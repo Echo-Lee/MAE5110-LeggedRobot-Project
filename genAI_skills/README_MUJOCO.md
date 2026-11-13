@@ -358,6 +358,32 @@ if any case misses a bound. This is an explicit local learning-quality check;
 hosted CI tests its metric definitions with synthetic counterexamples and does
 not train or download a checkpoint.
 
+Go2 policies can be compared across contact friction with
+`scripts/evaluate_go2_friction.py` and `scripts/plot_friction_eval.py`:
+
+```bash
+uv run --frozen scripts/evaluate_go2_friction.py --task go2_lowfric \
+  --device cuda:0 --output logs/eval/lowfric.json
+uv run --frozen scripts/evaluate_go2_friction.py --task go2 \
+  --device cuda:0 --output logs/eval/go2.json
+uv run --frozen scripts/plot_friction_eval.py logs/eval/go2.json \
+  logs/eval/lowfric.json --labels baseline lowfric --output logs/eval/friction.png
+```
+
+Each checkpoint runs deterministically from rest on every friction coefficient
+(default 0.05-1.0) times six fixed commands, with no pushes or other domain
+randomization; failures are absorbing. Per case it reports fall rate and time
+to fall, planar and yaw tracking RMSE, stance-foot slip speed and slip ratio
+(slip is measured at the spherical foot's contact point, so rolling is not
+slip), cost of transport from mechanical joint power, touchdowns per meter,
+contact duty, and torque saturation (`gym/utils/locomotion_metrics.py`).
+Cases on ice (mu <= 0.2) and ground (mu >= 0.6) carry declared bounds for
+`--check`; intermediate friction is reported but ungated.
+`--misreport_friction` feeds a `contact_friction` policy a constant value to
+measure its reliance on the privileged observation.
+`notebooks/molab_lowfric.py` runs the same train/evaluate/compare workflow on
+MoLab.
+
 The gate measures planar velocity RMSE, yaw-rate RMSE, target/velocity jitter
 above 10 Hz (beyond the first three gait harmonics), target clipping, swing-phase
 load, total foot support relative to body weight, contact duty, and each foot's
@@ -445,6 +471,7 @@ uv run --frozen scripts/train.py [OPTIONS]
 | `mini_cheetah_osc` | Mini Cheetah (oscillator) | Floating-base | 12 |
 | `go2` | Unitree Go2 | Floating-base | 12 |
 | `go2trot` | Unitree Go2 (trot based on clock) | Floating-base | 12 |
+| `go2_lowfric` | Unitree Go2 (ice/ground friction, privileged μ) | Floating-base | 12 |
 | `humanoid` | MIT Humanoid | Floating-base | 30 |
 | `humanoid_running` | Humanoid (running) | Floating-base | 30 |
 

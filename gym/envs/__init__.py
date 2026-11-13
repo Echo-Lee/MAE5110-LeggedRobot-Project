@@ -20,6 +20,7 @@ class_dict = {
     "Pendulum": ".pendulum.pendulum",
     "Go2": ".go2.go2",
     "Go2Trot": ".go2.go2trot",
+    "Go2LowFric": ".go2.go2_lowfric",
 }
 
 config_dict = {
@@ -36,6 +37,7 @@ config_dict = {
     "PendulumPSDCfg": ".pendulum.pendulum_PSD_config",
     "Go2Cfg": ".go2.go2_config",
     "Go2TrotCfg": ".go2.go2trot_config",
+    "Go2LowFricCfg": ".go2.go2_lowfric_config",
 }
 
 runner_config_dict = {
@@ -52,6 +54,7 @@ runner_config_dict = {
     "PendulumPSDRunnerCfg": ".pendulum.pendulum_PSD_config",
     "Go2RunnerCfg": ".go2.go2_config",
     "Go2TrotRunnerCfg": ".go2.go2trot_config",
+    "Go2LowFricRunnerCfg": ".go2.go2_lowfric_config",
 }
 
 task_dict = {
@@ -88,6 +91,7 @@ task_dict = {
     "psd_pendulum": ["Pendulum", "PendulumPSDCfg", "PendulumPSDRunnerCfg"],
     "go2": ["Go2", "Go2Cfg", "Go2RunnerCfg"],
     "go2trot": ["Go2Trot", "Go2TrotCfg", "Go2TrotRunnerCfg"],
+    "go2_lowfric": ["Go2LowFric", "Go2LowFricCfg", "Go2LowFricRunnerCfg"],
 }
 
 

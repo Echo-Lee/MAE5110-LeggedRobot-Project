@@ -5,6 +5,8 @@ import torch
 
 from gym.envs.base.domain_randomization import (
     DomainRandomizer,
+    apply_domain_randomization_override,
+    contact_friction_bins,
     contact_friction_range,
     scale_range,
 )
@@ -15,15 +17,23 @@ def _cfg(
     episode_ranges=None,
     link_mass=None,
     seed=7,
+    friction_bins=None,
+    friction_bin_weights=None,
+    resample_friction=False,
 ):
     return SimpleNamespace(
         seed=seed,
         domain_randomization=SimpleNamespace(
             startup=SimpleNamespace(
                 contact_friction_range=contact_friction,
+                contact_friction_bins=friction_bins,
+                contact_friction_bin_weights=friction_bin_weights,
                 link_mass_scale_range=link_mass,
             ),
-            episode=SimpleNamespace(scale_ranges=episode_ranges or {}),
+            episode=SimpleNamespace(
+                scale_ranges=episode_ranges or {},
+                resample_contact_friction=resample_friction,
+            ),
         ),
     )
 
@@ -261,3 +271,136 @@ def test_link_mass_scales_each_body_once_at_startup():
     torch.testing.assert_close(backend.link_mass, before)
     assert len(backend.link_mass_updates) == 1
     assert torch.unique(randomizer.link_mass_scale[0]).numel() > 1
+
+
+ICE_AND_GROUND = [[0.05, 0.2], [0.6, 1.2]]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"friction_bins": [[0.0, 0.3]]}, "inside"),
+        ({"friction_bins": [[0.3, 0.2]]}, "inside"),
+        ({"friction_bins": [[0.1, 0.2, 0.3]]}, "pairs"),
+        ({"friction_bins": ICE_AND_GROUND, "friction_bin_weights": [1.0]}, "one"),
+        ({"friction_bins": ICE_AND_GROUND, "friction_bin_weights": [1, 0]}, "one"),
+        ({"friction_bin_weights": [1.0]}, "require bins"),
+        ({"contact_friction": None, "friction_bins": [[0.1, 0.2]]}, "require"),
+    ],
+)
+def test_contact_friction_bins_reject_invalid_config(kwargs, match):
+    cfg = _cfg(**({"contact_friction": (0.05, 1.2)} | kwargs))
+    with pytest.raises(ValueError, match=match):
+        contact_friction_bins(cfg)
+
+
+def test_contact_friction_bins_normalize_weights():
+    cfg = _cfg(
+        contact_friction=(0.05, 1.2),
+        friction_bins=ICE_AND_GROUND,
+        friction_bin_weights=[1.0, 3.0],
+    )
+    bins, weights = contact_friction_bins(cfg)
+    assert bins == [(0.05, 0.2), (0.6, 1.2)]
+    assert weights == pytest.approx([0.25, 0.75])
+
+
+def test_resampling_without_friction_range_fails_at_construction():
+    with pytest.raises(ValueError, match="resample_contact_friction"):
+        DomainRandomizer(
+            _cfg(contact_friction=None, resample_friction=True),
+            _RecordingBackend(3),
+            "cpu",
+        )
+
+
+def test_binned_friction_samples_only_inside_bins_with_weighted_frequency():
+    count = 20000
+    backend = _RecordingBackend(count)
+    randomizer = DomainRandomizer(
+        _cfg(
+            contact_friction=(0.05, 1.2),
+            friction_bins=ICE_AND_GROUND,
+            friction_bin_weights=[1.0, 3.0],
+        ),
+        backend,
+        "cpu",
+    )
+    randomizer.randomize_startup(torch.arange(count))
+
+    values = backend.contact_friction
+    ice = (0.05 <= values) & (values <= 0.2)
+    ground = (0.6 <= values) & (values <= 1.2)
+    assert (ice | ground).all()
+    # 4 sigma of a binomial(20000, 0.25) fraction is about 0.012.
+    assert ice.float().mean().item() == pytest.approx(0.25, abs=0.015)
+    assert values[ice].min() < 0.06 and values[ice].max() > 0.19
+    assert values[ground].min() < 0.62 and values[ground].max() > 1.18
+
+
+def test_episodic_friction_resamples_only_resetting_envs_reproducibly():
+    def run():
+        backend = _RecordingBackend(6)
+        randomizer = DomainRandomizer(
+            _cfg(
+                contact_friction=(0.05, 1.2),
+                friction_bins=ICE_AND_GROUND,
+                resample_friction=True,
+                seed=9,
+            ),
+            backend,
+            "cpu",
+        )
+        randomizer.randomize_startup(torch.arange(6))
+        before = backend.contact_friction.clone()
+        mask = torch.tensor([False, True, False, True, False, False])
+        randomizer.randomize_episode(mask)
+        return before, backend.contact_friction.clone(), mask
+
+    before, after, mask = run()
+    _, repeated, _ = run()
+    assert torch.equal(after[~mask], before[~mask])
+    assert not torch.equal(after[mask], before[mask])
+    assert torch.equal(after, repeated)
+
+
+def test_episodic_friction_with_all_false_mask_changes_nothing():
+    backend = _RecordingBackend(4)
+    randomizer = DomainRandomizer(
+        _cfg(contact_friction=(0.05, 1.2), resample_friction=True),
+        backend,
+        "cpu",
+    )
+    randomizer.randomize_startup(torch.arange(4))
+    before = backend.contact_friction.clone()
+    randomizer.randomize_episode(torch.zeros(4, dtype=torch.bool))
+    assert torch.equal(backend.contact_friction, before)
+
+
+@pytest.mark.parametrize("mode", ["off", "pd-only", "mass-only"])
+def test_disabling_friction_axis_also_disables_bins_and_resampling(mode):
+    cfg = _cfg(
+        contact_friction=(0.05, 1.2),
+        friction_bins=ICE_AND_GROUND,
+        friction_bin_weights=[1.0, 1.0],
+        resample_friction=True,
+        episode_ranges={"p_gains": (0.9, 1.1), "d_gains": (0.9, 1.1)},
+        link_mass=(0.9, 1.1),
+    )
+    apply_domain_randomization_override(cfg, mode)
+    startup = cfg.domain_randomization.startup
+    assert startup.contact_friction_bins is None
+    assert startup.contact_friction_bin_weights is None
+    assert cfg.domain_randomization.episode.resample_contact_friction is False
+
+
+def test_friction_only_override_keeps_bins_and_resampling():
+    cfg = _cfg(
+        contact_friction=(0.05, 1.2),
+        friction_bins=ICE_AND_GROUND,
+        resample_friction=True,
+        episode_ranges={"p_gains": (0.9, 1.1)},
+    )
+    apply_domain_randomization_override(cfg, "friction-only")
+    assert cfg.domain_randomization.startup.contact_friction_bins == ICE_AND_GROUND
+    assert cfg.domain_randomization.episode.resample_contact_friction is True
