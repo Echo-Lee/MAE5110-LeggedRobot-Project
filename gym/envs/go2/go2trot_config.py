@@ -62,7 +62,7 @@ class Go2TrotCfg(Go2Cfg):
         var = 0.1
 
         class ranges(Go2Cfg.commands.ranges):
-            lin_vel_x = [-0.5, 0.0, 0.5, 1.0, 2.0]
+            lin_vel_x = [-0.5, 0.0, 0.5, 1.0, 2.0, 3.0, 4.0]
             lin_vel_y = 0.5
             yaw_vel = 1.5
 
