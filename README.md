@@ -91,7 +91,13 @@ as the W&B display name. Use `--experiment_name` to change the parent folder.
 To test your policy in simulation, run ```scripts/play.py```:
 
 ```
-uv run --frozen scripts/play.py --task=go2trot
+.venv/bin/mjpython scripts/play.py \
+  --task go2trot \
+  --device cpu \
+  --experiment_name go2trot \
+  --load_run exp_name \
+  --checkpoint -1 \
+  --original_cfg \
 ```
 
 Mandatory arguments:
@@ -107,6 +113,7 @@ Optional arguments:
 --load_run: Run directory under logs/<experiment_name>/ (default: latest).
 --checkpoint: Checkpoint iteration to resume (default: latest).
 --original_cfg: Load environment and runner configs saved with the selected run.
+--friction: The friction coefficient， e.g. 0.1 0.3.
 ```
 
 Go2Trot policies observe sine/cosine gait phase and phase frequency. To resume or

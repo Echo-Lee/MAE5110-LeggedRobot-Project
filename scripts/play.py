@@ -10,10 +10,13 @@ Supports MuJoCo CPU/Warp and optional VSim checkpoints.
 """
 
 import argparse
+import json
 import random
+from pathlib import Path
 
 import torch
 
+from gym import GYM_ROOT_DIR
 from gym.utils.helpers import set_seed
 from gym.utils.task_registry import task_registry
 
@@ -72,6 +75,14 @@ def get_play_args(argv=None):
         "gym/utils/interfaces/MujocoKeyboardInterface.py for key bindings). "
         "Use --no-keyboard to disable.",
     )
+    parser.add_argument(
+        "--friction",
+        type=float,
+        nargs=2,
+        metavar=("LOW", "HIGH"),
+        default=None,
+        help="Contact-friction sampling range. Use identical bounds for fixed friction.",
+    )
     return parser.parse_args(argv)
 
 
@@ -86,6 +97,31 @@ def setup(args):
         load_run=args.load_run,
     )
 
+    # Recover training-time CLI overrides when replaying a saved config.
+    # An explicit --friction argument below deliberately takes precedence.
+    if args.original_cfg and args.friction is None:
+        run_dir = (
+            Path(GYM_ROOT_DIR)
+            / "logs"
+            / train_cfg.runner.experiment_name
+            / train_cfg.runner.load_run
+        )
+        overrides_path = run_dir / "runtime_overrides.json"
+        if overrides_path.is_file():
+            with overrides_path.open() as file:
+                saved_overrides = json.load(file)
+            friction_range = saved_overrides.get("contact_friction_range")
+            if friction_range is not None:
+                low, high = map(float, friction_range)
+                if not 0.0 <= low <= high:
+                    raise ValueError(
+                        "saved contact-friction range must satisfy 0 <= LOW <= HIGH"
+                    )
+                env_cfg.domain_randomization.startup.contact_friction_range = [
+                    low,
+                    high
+                ]
+
     # Play-time overrides — small batch, long episodes, no pushes.
     env_cfg.env.num_envs = args.num_envs
     env_cfg.env.episode_length_s = 50
@@ -96,6 +132,13 @@ def setup(args):
     env_cfg.init_state.reset_mode = "reset_to_basic"
     if hasattr(env_cfg, "viewer"):
         env_cfg.viewer.show_ui = args.viewer_ui
+
+    # Set friction coefficient
+    if args.friction is not None:
+        low, high = args.friction
+        if not 0.0 <= low <= high:
+            raise ValueError("--friction must satisfy 0 <= LOW <= HIGH")
+        env_cfg.domain_randomization.startup.contact_friction_range = [low, high]
 
     if args.seed is not None:
         env_cfg.seed = args.seed

@@ -8,6 +8,8 @@ The selected backend is MuJoCo CPU/Warp or optional VSim.
 """
 
 import argparse
+import json
+from pathlib import Path
 
 from gym.utils.task_registry import task_registry
 from gym.utils.helpers import randomize_episode_counters, set_seed
@@ -86,6 +88,15 @@ def make_train_parser():
     parser.add_argument("--disable_wandb", action="store_true", default=False)
     parser.add_argument("--wandb_project", type=str, default=None)
     parser.add_argument("--wandb_entity", type=str, default=None)
+    # Add friction
+    parser.add_argument(
+        "--friction",
+        type=float,
+        nargs=2,
+        metavar=("LOW", "HIGH"),
+        default=None,
+        help="Contact-friction sampling range. Use identical bounds for fixed friction.",
+    )
     return parser
 
 
@@ -143,11 +154,32 @@ def setup(args=None, env_cfg=None, train_cfg=None):
     if args.checkpoint is not None:
         train_cfg.runner.checkpoint = args.checkpoint
 
+        # Set friction coefficient
+    if args.friction is not None:
+        low, high = args.friction
+        if not 0.0 <= low <= high:
+            raise ValueError("--friction must satisfy 0 <= LOW <= HIGH")
+        env_cfg.domain_randomization.startup.contact_friction_range = [low, high]
+
+
     train_cfg.runner.device = args.device
 
     # Compute sim_dt, decimation, discount rates
     task_registry.convert_frequencies_to_params(env_cfg, train_cfg)
     task_registry.set_log_dir_name(train_cfg)
+    overrides_path = Path(train_cfg.log_dir) / "runtime_overrides.json"
+    overrides_path.parent.mkdir(parents=True, exist_ok=True)
+    with overrides_path.open("w") as file:
+        json.dump(
+            {
+                "contact_friction_range": (
+                    env_cfg.domain_randomization.startup.contact_friction_range
+                )
+            },
+            file,
+            indent=2,
+        )
+        file.write("\n")
 
     set_seed(env_cfg.seed)
 
