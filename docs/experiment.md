@@ -9,7 +9,7 @@ Experiment:
 - Vanilla version of training on friction level: (0.1, 0.3)
 The result is: it performs pretty well test time on friction level of 0.1, even OOD 0.05 level. But it performs bad on 1.0 high friction terrain.
 
-- Vanilla version: training on (0.1, 1.0) road.
+- Vanilla version: training on (0.1, 1.0) road. But it performs bad on 1.0 high friction terrain.
 
 
 2. Nov 13:

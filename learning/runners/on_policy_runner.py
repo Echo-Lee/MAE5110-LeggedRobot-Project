@@ -116,6 +116,14 @@ class OnPolicyRunner(BaseRunner):
 
                     logger.log_rewards(rewards_dict.sum(dim=0))
                     logger.log_rewards({"total_rewards": total_rewards})
+                    if hasattr(self.env, "get_training_diagnostics"):
+                        diagnostics = self.env.get_training_diagnostics()
+                        logger.log_rewards(
+                            {
+                                name: value * self.env.dt
+                                for name, value in diagnostics.items()
+                            }
+                        )
                     logger.finish_step(self.env.timed_out | self.env.terminated)
             logger.toc("collection")
 
@@ -199,6 +207,8 @@ class OnPolicyRunner(BaseRunner):
             list(self.critic_cfg["reward"]["termination_weight"].keys())
         )
         logger.register_rewards(["total_rewards"])
+        if hasattr(self.env, "get_training_diagnostics"):
+            logger.register_rewards(list(self.env.get_training_diagnostics().keys()))
         logger.register_category(
             "algorithm",
             self.alg,

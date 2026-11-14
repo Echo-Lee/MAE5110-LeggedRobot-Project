@@ -57,6 +57,70 @@ def high_frequency_rms(value, valid, dt, cutoff_hz=10.0):
     return torch.cat(powers).mean().sqrt().item() if powers else 1e30
 
 
+def mechanical_energy_metrics(trace, dt, valid, command):
+    """Return gross joint work and travel-normalized efficiency metrics.
+
+    ``torque`` is the torque sent to the backend for a control step. The
+    matching joint velocity is estimated with the pre/post-step trapezoid.
+    This Go2Trot evaluator runs one simulation step per control step, so
+    ``dt`` is also the physics integration interval.
+
+    Gross work counts both positive and negative mechanical power. It is a
+    conservative actuator-work proxy, not a battery-energy model.
+    """
+    joint_velocity = 0.5 * (trace["joint_velocity_before"] + trace["joint_velocity"])
+    gross_energy = (trace["torque"] * joint_velocity).abs().sum(dim=-1) * dt
+    total_energy = gross_energy[valid].sum()
+
+    body_weight = trace["body_weight"]
+    weight_per_replica = (body_weight * valid).sum(dim=0) / valid.sum(dim=0)
+    planar_step_distance = (
+        trace["position"][:, :, :2] - trace["position_before"][:, :, :2]
+    ).norm(dim=-1)
+    path_length_per_replica = (planar_step_distance * valid).sum(dim=0)
+    total_path_length = path_length_per_replica.sum()
+
+    direction = command[:2].to(dtype=trace["position_before"].dtype)
+    direction_norm = direction.norm()
+    result = {
+        "gross_mechanical_energy_j": total_energy.item(),
+        "gross_mechanical_energy_j_per_replica": (total_energy / valid.shape[1]).item(),
+    }
+    if total_path_length > 1e-6:
+        result["planar_path_length_m"] = total_path_length.item()
+        result["planar_path_length_m_per_replica"] = (
+            total_path_length / valid.shape[1]
+        ).item()
+        result["gross_mechanical_energy_j_per_path_m"] = (
+            total_energy / total_path_length
+        ).item()
+        result["gross_mechanical_path_cost_of_transport"] = (
+            total_energy / (weight_per_replica * path_length_per_replica).sum()
+        ).item()
+    if direction_norm <= 1e-12:
+        return result
+
+    unit_direction = direction / direction_norm
+    progress = (
+        (trace["position"][:, :, :2] - trace["position_before"][:, :, :2])
+        * unit_direction
+    ).sum(dim=-1)
+    progress_per_replica = (progress * valid).sum(dim=0)
+    total_progress = progress_per_replica.sum()
+    result["projected_progress_m"] = total_progress.item()
+    result["projected_progress_m_per_replica"] = (
+        total_progress / valid.shape[1]
+    ).item()
+    if total_progress <= 1e-6:
+        return result
+
+    result["gross_mechanical_energy_j_per_m"] = (total_energy / total_progress).item()
+    result["gross_mechanical_cost_of_transport"] = (
+        total_energy / (weight_per_replica * progress_per_replica).sum()
+    ).item()
+    return result
+
+
 def summarize_case(trace, dt, warmup_steps, frequency, command):
     """Summarize [time, replica, feature] traces without rewarding early falls.
 
@@ -115,6 +179,7 @@ def summarize_case(trace, dt, warmup_steps, frequency, command):
     shares = loads[valid].sum(dim=0)
     result["load_share"] = (shares / shares.sum().clamp_min(1e-12)).tolist()
     result["contact_duty"] = (loads[valid] > 5.0).float().mean(dim=0).tolist()
+    result.update(mechanical_energy_metrics(trace, dt, valid, command))
 
     # Use the known clock rather than wrapped phase differences, including
     # the initial phase offset. Only wholly observed, surviving strides count.
@@ -160,6 +225,11 @@ def summarize_case(trace, dt, warmup_steps, frequency, command):
 
 @torch.no_grad()
 def evaluate(env, runner, *, replicas=4, seconds=8.0, warmup=2.0):
+    if env.cfg.control.decimation != 1:
+        raise ValueError(
+            "mechanical-energy evaluation requires one physics step per control "
+            "step; add substep accounting before using a different decimation"
+        )
     cases = [(name, hz) for name in COMMANDS for hz in (1.0, 2.0, 3.0)]
     commands = torch.tensor(
         [COMMANDS[name] for name, _ in cases], device=env.device
@@ -177,6 +247,10 @@ def evaluate(env, runner, *, replicas=4, seconds=8.0, warmup=2.0):
             "velocity",
             "residual",
             "joint_velocity",
+            "joint_velocity_before",
+            "torque",
+            "position",
+            "position_before",
             "clipped",
             "clip_error",
             "load",
@@ -192,6 +266,8 @@ def evaluate(env, runner, *, replicas=4, seconds=8.0, warmup=2.0):
         runner.set_actions(runner.actor_cfg["actions"], actions)
         requested = env.dof_pos_target.clone()
         phase = env.phase.clone()
+        joint_velocity_before = env.dof_vel.clone()
+        position_before = env.root_states[:, :3].clone()
         env.step()
         alive &= ~env.terminated
         values = {
@@ -201,6 +277,10 @@ def evaluate(env, runner, *, replicas=4, seconds=8.0, warmup=2.0):
             ),
             "residual": env.dof_pos_target,
             "joint_velocity": env.dof_vel,
+            "joint_velocity_before": joint_velocity_before,
+            "torque": env.torques,
+            "position": env.root_states[:, :3],
+            "position_before": position_before,
             "clipped": (requested - env.dof_pos_target).abs() > 1e-5,
             "clip_error": requested - env.dof_pos_target,
             "load": env.contact_forces[:, env.feet_indices, 2],
@@ -294,8 +374,15 @@ def main():
     finally:
         env._backend.close()
     report = {
-        "protocol": "go2trot-v1",
+        "protocol": "go2trot-v3",
         "jitter_cutoff_hz": 10.0,
+        "mechanical_energy": {
+            "method": "sum_joints(abs(torque * midpoint_joint_velocity)) * control_dt",
+            "scope": "gross actuator mechanical work; not battery energy",
+            "distance": "base displacement projected onto the planar command",
+            "cost_of_transport": "gross_work / (weight * projected_progress)",
+            "path_cost_of_transport": "gross_work / (weight * planar_path_length)",
+        },
         "checkpoint": str(path.resolve()),
         "checkpoint_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "revision": subprocess.check_output(

@@ -142,6 +142,11 @@ class Go2Cfg(LeggedRobotCfg):
         max_contact_force = 600.0
         base_height_target = BASE_HEIGHT_REF
         tracking_sigma = 0.25
+        # Go2-only gross mechanical-power regularization. Zero preserves the
+        # vanilla baseline exactly while retaining diagnostics.
+        energy_weight = 0.0
+        sigma_energy = 200.0  # J/m
+        min_velocity = 0.1  # m/s
 
     class scaling(LeggedRobotCfg.scaling):
         base_ang_vel = 0.3
@@ -217,6 +222,9 @@ class Go2RunnerCfg(LeggedRobotRunnerCfg):
                 dof_pos_limits = 0.0
                 feet_contact_forces = 0.0
                 dof_near_home = 0.0
+                # The configurable coefficient is kept in reward_settings so
+                # existing reward weights remain unchanged.
+                energy = 1.0
 
             class termination_weight:
                 termination = 0.01
