@@ -34,5 +34,9 @@ class Go2LowFricRunnerCfg(Go2RunnerCfg):
     class critic(Go2RunnerCfg.critic):
         obs = Go2RunnerCfg.critic.obs + ["contact_friction"]
 
+    class algorithm(Go2RunnerCfg.algorithm):
+        # Initial value: 0.01 (inherited from LeggedRobotRunnerCfg).
+        entropy_coef = 0.002
+
     class runner(Go2RunnerCfg.runner):
         experiment_name = "go2_lowfric"
