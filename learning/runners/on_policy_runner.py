@@ -116,8 +116,16 @@ class OnPolicyRunner(BaseRunner):
 
                     logger.log_rewards(rewards_dict.sum(dim=0))
                     logger.log_rewards({"total_rewards": total_rewards})
+                    diagnostics = {}
                     if hasattr(self.env, "get_training_diagnostics"):
-                        diagnostics = self.env.get_training_diagnostics()
+                        diagnostics.update(self.env.get_training_diagnostics())
+                    if hasattr(self.env, "get_reward_diagnostics"):
+                        diagnostics.update(
+                            self.env.get_reward_diagnostics(
+                                self.critic_cfg["reward"]["weights"]
+                            )
+                        )
+                    if diagnostics:
                         logger.log_rewards(
                             {
                                 name: value * self.env.dt
@@ -207,8 +215,17 @@ class OnPolicyRunner(BaseRunner):
             list(self.critic_cfg["reward"]["termination_weight"].keys())
         )
         logger.register_rewards(["total_rewards"])
+        diagnostic_names = []
         if hasattr(self.env, "get_training_diagnostics"):
-            logger.register_rewards(list(self.env.get_training_diagnostics().keys()))
+            diagnostic_names.extend(self.env.get_training_diagnostics().keys())
+        if hasattr(self.env, "get_reward_diagnostics"):
+            diagnostic_names.extend(
+                self.env.get_reward_diagnostics(
+                    self.critic_cfg["reward"]["weights"]
+                ).keys()
+            )
+        if diagnostic_names:
+            logger.register_rewards(diagnostic_names)
         logger.register_category(
             "algorithm",
             self.alg,
