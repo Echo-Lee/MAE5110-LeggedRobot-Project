@@ -65,6 +65,14 @@ def get_play_args(argv=None):
         "alongside keyboard teleop)",
     )
     parser.add_argument(
+        "--follow_camera",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="lock the MuJoCo viewer camera onto the robot (environment 0); "
+        "mouse still orbits and zooms around it, F toggles it during "
+        "playback. Use --no-follow_camera for a fixed camera.",
+    )
+    parser.add_argument(
         "--keyboard",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -157,6 +165,16 @@ if __name__ == "__main__":
                 "WARNING: the MuJoCo warp (GPU) backend has no interactive viewer "
                 "— nothing will render. Use --device cpu for playback."
             )
+        if args.follow_camera and not args.headless:
+            # Fixed-base tasks (pendulum, cartpole) have nothing to follow
+            # and keep their configured camera silently.
+            if not hasattr(env._backend, "set_camera_tracking"):
+                print(
+                    "WARNING: --follow_camera is only supported by the MuJoCo "
+                    "CPU viewer; keeping the configured camera."
+                )
+            elif env._backend.supports_camera_tracking:
+                env._backend.set_camera_tracking(True)
         if args.keyboard and hasattr(env, "commands") and not args.headless:
             # Each viewer has its own input model: MuJoCo dispatches key
             # events via a callback, vlearn polls key state per frame.

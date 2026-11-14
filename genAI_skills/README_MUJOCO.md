@@ -264,6 +264,13 @@ remain unrestricted; backend callers can opt out with
 `render(sync_frame_time=False)`. This changes wall-clock pacing, not the physics
 timestep or control frequency. Workloads slower than real time remain slower.
 
+For floating-base robots, the MuJoCo CPU viewer camera locks onto environment
+0's base during playback (the viewer draws environment 0). The mouse still
+orbits and zooms around the robot; press `F` to toggle the lock, or pass
+`--no-follow_camera` to keep the configured fixed camera. Fixed-base tasks
+keep their configured camera. Other viewers keep their configured camera and
+print a warning.
+
 Only the saved config modules and their saved config dependencies are loaded.
 The current task implementation, learning stack, and selected physics backend
 remain active. This makes the option suitable for recent compatible runs while
