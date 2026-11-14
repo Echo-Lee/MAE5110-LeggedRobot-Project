@@ -34,6 +34,17 @@ class Go2LowFricRunnerCfg(Go2RunnerCfg):
     class critic(Go2RunnerCfg.critic):
         obs = Go2RunnerCfg.critic.obs + ["contact_friction"]
 
+        class reward(Go2RunnerCfg.critic.reward):
+            class weights(Go2RunnerCfg.critic.reward.weights):
+                # Energy penalty. Run Nov14_22-13-21_ (no energy terms) used
+                # ~1000 W mean mechanical power and ~200 Nm^2 mean squared
+                # torque, so these start at about -1.0 and -0.3 per step
+                # against a total reward of ~7. Power discourages wasted leg
+                # motion (tapping, drift when commanded to stop); squared
+                # torque is lowest when load is shared by all legs.
+                power = 1.0e-3  # new term (default 0: absent)
+                torques = 1.5e-3  # initial value: 5.0e-6 (inherited from go2)
+
     class algorithm(Go2RunnerCfg.algorithm):
         # Initial value: 0.01 (inherited from LeggedRobotRunnerCfg).
         entropy_coef = 0.002

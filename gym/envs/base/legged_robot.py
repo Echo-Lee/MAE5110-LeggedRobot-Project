@@ -569,6 +569,18 @@ class LeggedRobot(BaseTask):
         """Penalize torques"""
         return -torch.mean(torch.square(self.torques), dim=1)
 
+    def _reward_power(self):
+        """Penalize total mechanical joint power, sum_j |tau_j * qdot_j| in W.
+
+        Summed, not averaged: total power is the physical quantity whose
+        integral over distance is the evaluated cost of transport. Braking
+        (negative) work counts as cost, as in that metric. A joint held still
+        costs nothing here; torques penalizes static load instead. With
+        decimation > 1 this samples the last physics substep.
+        """
+        joint_vel = self.dof_vel.index_select(1, self.actuated_dof_indices)
+        return -torch.sum(torch.abs(self.torques * joint_vel), dim=1)
+
     def _reward_dof_vel(self):
         return -torch.mean(torch.square(self.dof_vel), dim=1)
 
