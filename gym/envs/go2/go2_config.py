@@ -145,7 +145,7 @@ class Go2Cfg(LeggedRobotCfg):
         # Go2-only gross mechanical-power regularization. Zero preserves the
         # vanilla baseline exactly while retaining diagnostics.
         energy_weight = 0.5
-        sigma_energy = 200.0  # J/m
+        sigma_energy = 1000.0  # J/m
         min_velocity = 0.1  # m/s
 
     class scaling(LeggedRobotCfg.scaling):
