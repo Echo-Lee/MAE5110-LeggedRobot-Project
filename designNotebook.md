@@ -35,7 +35,9 @@ Engineering notebook to record the process of training, assumptions, edits, and 
 | 9 | **`Nov15_07-35-27_`** (new best) | + `slide_pose` (hold standing pose while sliding, weight 3) | 28/30; drift when stopped ≈ 0. Slide: pose dev 0.43 → 0.24 rad, least-used foot 3–13% → 42–83%, all 4 feet down up to 61%, energy/m ↓. Rear-left leg also used when **walking** now. Decel still 0.66–0.85 μg. |
 | 10 | `Nov15_16-53-07_` | + `slide_still` weight 3 | Joint speed in slide halved (1.34 → 0.65 rad/s), energy/m ↓, decel 0.62–0.82 μg (≈ run 9). But froze in a non-standing pose (dev 0.24 → 0.45 rad) and walking got stiffer: 25/30, top speed 2.74 → 2.03 m/s at μ = 1, ground CoT ↑. Run 9 stays best overall. |
 | 11 | `Nov15_18-40-46_` | `slide_still` 3 → 0; `slide_pose` 3 → 10 | Slide decel 0.75–0.87 μg (slightly ↑) but pose dev 0.32–0.36 rad (worse than run 9) and more steps; walking much worse: 22/30, CoT at 1 m/s 1.95–3.29, ground turning broken. Run 9 stays best. |
-| 12 | pending | Run 9 weights (`slide_pose` 3) + residual hold: slide-phase joint targets × 0.2 | Preview with run 9's policy (untrained for it): 0.84–1.08 μg on μ ≤ 0.1, no falls at μ = 0.2 but weak braking there (0.44–0.50 μg). |
+| 12 | **`Nov15_19-11-13_`** (best slide) | Run 9 weights + residual hold (slide-phase targets × 0.2) | Best learned slide: distance 1.27–1.45× ideal, decel 0.65–0.87 μg, all 4 feet down 45–65%, pose dev 0.18–0.20, no falls at any μ. Walking 25/30 (turn-in-place weaker); CoT at 1 m/s 0.82 on ice (lowest yet); top speed 2.32 m/s at μ = 1. |
+| 12b | `Nov15_19-31-15_` | Run 12 repeated (different random seed) | Slide reproduces (decel 0.80 vs 0.78 μg mean, no falls). Walking: 19/30 (run 12: 25); turn-in-place fails in both seeds; top speed on ice 1.72 vs 1.06 m/s. |
+| 13 | pending (2 seeds: `--seed 1`, `--seed 2`) | Run 12 + 10% pure turn-in-place commands | Target: turn-in-place passes on both seeds; slide unchanged (~0.8 μg, no falls). Pure-turn samples 1.3% → 10.4%. |
 
 ### Result figures
 
@@ -172,7 +174,7 @@ Each run keeps the same color in every figure. Data: `logs/eval/*.json`.
 
    - *Insight:* a rigid standing pose brakes at ≈ μg on real ice (μ ≤ 0.1), confirming the sim test. But at μ = 0.2 the braking force (2 m/s²) acts at the feet, below the center of mass, and pitches a rigid robot forward onto its nose. Braking harder needs active balance (leaning back), which explains why the learned policies settle at ~0.7–0.85 μg: they trade braking for staying upright.
 
-9. **Residual hold** (run 12, pending)
+9. **Residual hold** (run 12, `Nov15_19-11-13_`)
    - *Change:* revert `slide_pose` to 3 (run 9's weights); new `commands.slide_action_scale = 0.2`. During the slide phase the joint targets (offsets from the standing pose) are multiplied by 0.2, applied inside the env step before the PD loop. The policy keeps ~20% authority (≈ ±0.25 rad at the thigh): enough to balance and lean back, not to splay or step. Constrains the action space instead of adding penalties, which stalled in runs 10–11.
    - *Preview (run 9's policy, not trained for the hold):*
 
@@ -183,6 +185,37 @@ Each run keeps the same color in every figure. Data: `logs/eval/*.json`.
      | 0.2 | 1.2 | 1.79 | 0.50 | 8% | 0.24 | 0% |
 
    - *Success:* keep ≈ μg on μ ≤ 0.1, raise braking at μ = 0.2 without falls, walking back to run 9 (28/30).
+   - *Result, slide* (`logs/eval/slide_run12.json`, video `logs/videos/run12_slide_mu0.1_v1.2.mp4`), v0 = 1.2:
+
+     | μ | Dist ratio (run 9) | Decel ÷ μg (run 9) | All 4 feet (run 9) | Least-used foot (run 9) | Pose dev rad (run 9) | Energy J/m (run 9) | Fell |
+     |---|---|---|---|---|---|---|---|
+     | 0.05 | **1.30** (1.71) | **0.84** (0.67) | **63%** (56%) | **86%** (80%) | **0.20** (0.24) | **84** (135) | 0% |
+     | 0.1 | **1.36** (1.51) | 0.77 (0.79) | **56%** (42%) | **82%** (71%) | **0.20** (0.24) | **82** (111) | 0% |
+     | 0.2 | **1.27** (1.78) | 0.65 (0.69) | **45%** (25%) | **72%** (43%) | **0.19** (0.24) | 124 (117) | 0% |
+
+   - *Observation:* the best learned slide so far on every slide metric except decel at μ ≥ 0.1, with no falls anywhere (the scripted hold fell 88% at μ = 0.2). But the trained policy brakes *less* on ice than the untrained preview (run 9 policy + hold: 0.84–1.08 μg at μ ≤ 0.1); training used the 20% authority partly for something other than braking.
+   - *Walking:* 25/30 (run 9: 28). Turn-in-place weaker (0.36–0.67 rad/s; three yaw failures). Matched-speed CoT at 1 m/s 0.82–1.32, the lowest on ice of any run; top speed 1.06 / 2.32 m/s at μ = 0.05 / 1 (run 9: 1.23 / 2.74). All four legs used, but FR + RL carry more (0.5–0.63) than FL + RR (0.22–0.32).
+   - *Second seed (run 12b, `Nov15_19-31-15_`, same config):*
+
+     | Metric | Run 12 | Run 12b | Seed-to-seed difference |
+     |---|---|---|---|
+     | Slide decel ÷ μg (mean of 10 cases) | 0.78 | 0.80 | per case mean 0.07, max 0.18 |
+     | Slide distance ratio (mean) | 1.35 | 1.42 | per case mean 0.19, max 0.35 |
+     | All 4 feet down in slide (mean) | 56% | 53% | per case mean 3% |
+     | Pose dev in slide (mean, rad) | 0.19 | 0.29 | 0.10 |
+     | Friction grid passed | 25/30 | 19/30 | 6 cases |
+     | Turn-in-place failures | 3 | 4 | both fail it |
+     | Top speed μ = 0.05 / 1 (m/s) | 1.06 / 2.32 | 1.72 / 2.34 | 0.66 on ice |
+     | CoT at 1 m/s, μ = 0.1 / 1 | 0.82 / 1.32 | 0.81 / 1.80 | |
+
+   - *Conclusions:* (1) the residual-hold **slide is reproducible** (means within ~0.02–0.07, no falls in either seed). (2) The **turning loss is systematic**, not seed noise: both seeds fail turn-in-place. (3) **Walking scores vary a lot between seeds** (19 vs 25 of 30; ice top speed 1.06 vs 1.72), so earlier single-run walking comparisons (e.g. run 9's 28 vs run 12's 25) are within noise. Per-case slide differences up to ~0.2 are also noise.
+   - *Lesson:* compare configurations on per-friction means over cases, and on ≥ 2 seeds for walking claims. `train.py` now saves `seed.json` in every run folder (`--seed` to fix it).
+   - *Visual check:* the run-up-and-slide videos look good: the robot runs up, plants all four feet near the standing pose, and slides to a stop. The remaining issues are in the numbers (braking ~0.8 μg, turning), not visible failures.
+
+10. **Turn-in-place commands** (run 13, pending, 2 seeds)
+   - *Change:* `commands.turn_in_place_probability = 0.1`: that fraction of command resamples become pure turns (forward/sideways 0, |yaw| ≥ `turn_in_place_min_yaw` = 0.5 rad/s). Applies at reset, the 3 s resamples, and when a slide ends; slide episodes still override their own commands. Pure-turn training samples 1.3% → 10.4%.
+   - *Why:* both residual-hold seeds fail turn-in-place; pure turns were ~1% of commands and slide episodes add long straight, zero-yaw stretches.
+   - *Plan:* train with `--seed 1` and `--seed 2`; compare seed means against runs 12/12b.
 
 ## Observations
 
@@ -200,7 +233,7 @@ Each run keeps the same color in every figure. Data: `logs/eval/*.json`.
 Each stage changes one big thing (behavior → physics → structure), so results stay attributable.
 
 1. **Finish controlled sliding** (privileged μ, current stage)
-   - Run 12: residual hold (option c) on run 9's weights. Fallback (option b): scripted standing-pose hold only where stable (μ ≤ ~0.1).
+   - Run 13 (2 seeds): turn-in-place commands. Then optionally μ-dependent `slide_action_scale` (e.g. 0.1 at μ ≤ 0.1, 0.3 at μ = 0.2). Fallback (option b): scripted standing-pose hold only where stable.
    - *Done when:* slide brakes at ≥ 0.9 μg and walking stays ~28/30.
    - Extensions from the goal: controlled stop variants (yaw/spin to reorient while sliding). On flat isotropic ice, legs out cannot brake harder than μg.
 

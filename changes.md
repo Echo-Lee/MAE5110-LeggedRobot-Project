@@ -16,7 +16,9 @@ Everything below is committed as of `03666c4`, except the **run 8** changes mark
 | `2f3bac0` | Run 9: `slide_pose` reward (weight 3); slide metrics `min_foot_loaded_fraction`, `pose_rmse_rad` |
 | `f62a2a5` | Run 10: `slide_still` weight 0 → 3; slide steps count only after ≥ 50 ms in the air (`count_steps`), contact chatter reported as `contact_breaks_per_s` |
 | `78b0b02` | Run 11: `slide_still` 3 → 0, `slide_pose` 3 → 10 |
-| *(uncommitted)* | Run 12: residual hold (`commands.slide_action_scale` 0.2, `Go2LowFric._apply_slide_action_scale` in `_pre_decimation_step`); `slide_pose` back to 3 |
+| `2885576` | Run 12: residual hold (`commands.slide_action_scale` 0.2, `Go2LowFric._apply_slide_action_scale` in `_pre_decimation_step`); `slide_pose` back to 3 |
+| *(uncommitted)* | `scripts/train.py` saves `seed.json` (seed + whether from `--seed` or random) in each run folder; test `tests/unit_tests/test_train_seed.py` |
+| *(uncommitted)* | Run 13: `commands.turn_in_place_probability` 0.1 + `turn_in_place_min_yaw` 0.5 (`Go2LowFric._resample_commands`); 4 tests |
 
 Run tests (`env -u PYTHONPATH` keeps the ROS Python path out of the venv):
 

@@ -111,6 +111,31 @@ class Go2LowFric(Go2):
         self._sample_slide_episodes(reset_mask)
         self._apply_slide_commands()
 
+    def _resample_commands(self, command_mask):
+        """Sample commands, then turn some of them into pure turn-in-place.
+
+        The base sampler only zeroes forward/sideways speed when it is small,
+        so pure turns are ~1% of commands, and both residual-hold seeds
+        (runs Nov15_19-11-13_, Nov15_19-31-15_) failed turn-in-place.
+        A fraction turn_in_place_probability of resamples become: no
+        forward/sideways speed, yaw rate of at least turn_in_place_min_yaw.
+        """
+        super()._resample_commands(command_mask)
+        # Snapshots of runs before this option lack it; they trained without.
+        probability = getattr(self.cfg.commands, "turn_in_place_probability", 0.0)
+        if probability == 0.0:
+            return
+        turn = command_mask & (
+            torch.rand(self.num_envs, device=self.device) < probability
+        )
+        yaw = self.commands[:, 2]
+        minimum = self.cfg.commands.turn_in_place_min_yaw
+        # Keep the sampled direction (and size, if already large enough).
+        direction = torch.where(yaw < 0, -1.0, 1.0)
+        turn_yaw = direction * yaw.abs().clamp_min(minimum)
+        self.commands[:, :2].masked_fill_(turn.unsqueeze(1), 0.0)
+        torch.where(turn, turn_yaw, yaw, out=self.commands[:, 2])
+
     def _sample_slide_episodes(self, reset_mask):
         """Choose which resetting envs run a run-up-and-slide episode.
 

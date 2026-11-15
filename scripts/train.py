@@ -8,11 +8,30 @@ The selected backend is MuJoCo CPU/Warp or optional VSim.
 """
 
 import argparse
+import json
+import os
 
 from gym.utils.task_registry import task_registry
 from gym.utils.helpers import randomize_episode_counters, set_seed
 from gym.utils.logging_and_saving import local_code_save_helper
 from gym.utils.logging_and_saving import wandb_singleton
+
+
+SEED_FILE = "seed.json"
+
+
+def save_seed(log_dir, seed, explicit):
+    """Record the run's seed in its folder, so the run can be reproduced.
+
+    ``explicit`` is True when the seed came from --seed, False when it was
+    drawn at random because none was given.
+    """
+    os.makedirs(log_dir, exist_ok=True)
+    path = os.path.join(log_dir, SEED_FILE)
+    with open(path, "w") as file:
+        json.dump({"seed": seed, "source": "--seed" if explicit else "random"}, file)
+        file.write("\n")
+    return path
 
 
 def make_train_parser():
@@ -174,6 +193,8 @@ def setup(args=None, env_cfg=None, train_cfg=None):
             train_cfg._original_cfg_source_dir if args.original_cfg else None
         ),
     )
+    seed_path = save_seed(train_cfg.log_dir, env_cfg.seed, args.seed is not None)
+    print(f"seed {env_cfg.seed} saved to {seed_path}")
 
     return train_cfg, policy_runner
 

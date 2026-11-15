@@ -19,6 +19,11 @@ class Go2LowFricCfg(Go2Cfg):
         # the rate pure sliding decelerates, v0 - slide_decel_scale*mu*g*t,
         # down to a stop for the rest of the episode. With the power penalty,
         # coasting on planted feet is the cheapest way to follow that decay.
+        # Fraction of command resamples that become pure turn-in-place (zero
+        # forward/sideways speed). Without it pure turns are ~1% of commands
+        # and both residual-hold seeds failed turn-in-place (runs 12, 12b).
+        turn_in_place_probability = 0.1
+        turn_in_place_min_yaw = 0.5  # rad/s; avoids near-zero "turns"
         slide_probability = 0.3  # of eligible (ice) episodes
         slide_max_friction = 0.2  # only where mu <= this
         slide_speed_range = [0.8, 1.3]  # v0 (m/s); mu=0.05 tops out ~1.3

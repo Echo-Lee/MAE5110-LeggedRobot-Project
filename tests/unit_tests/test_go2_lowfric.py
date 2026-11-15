@@ -354,3 +354,59 @@ def test_runs_before_the_residual_hold_keep_full_authority(env):
     env.slide_phase[:] = 1.0
     env._apply_slide_action_scale()
     assert (env.dof_pos_target == 0.5).all()
+
+
+# --- turn-in-place commands --------------------------------------------------------
+
+
+def test_turn_in_place_zeroes_translation_and_keeps_a_clear_turn(env):
+    env.cfg.commands.turn_in_place_probability = 1.0
+    env.commands[:] = 7.0
+    mask = torch.zeros(8, dtype=torch.bool)
+    mask[[0, 3, 5]] = True
+    env._resample_commands(mask)
+    turned = env.commands[mask]
+    assert (turned[:, :2] == 0).all()
+    assert (turned[:, 2].abs() >= env.cfg.commands.turn_in_place_min_yaw).all()
+    assert torch.equal(env.commands[~mask], torch.full((5, 3), 7.0))
+
+
+def test_turn_in_place_fraction_matches_the_setting():
+    from gym.envs.go2.go2_lowfric import Go2LowFric
+    from gym.utils.task_registry import select_backend, task_registry
+
+    cfg = Go2LowFricCfg()
+    cfg.env.num_envs = 2000
+    cfg.seed = 5
+    cfg.commands.slide_probability = 0.0
+    task_registry.convert_frequencies_to_params(cfg, Go2LowFricRunnerCfg())
+    task = Go2LowFric(cfg, "cpu", True, select_backend(cfg, "cpu", "mujoco"))
+    try:
+        assert cfg.commands.turn_in_place_probability == pytest.approx(0.1)
+        task._resample_commands(torch.ones(2000, dtype=torch.bool))
+        pure_turn = (task.commands[:, :2] == 0).all(dim=1) & (
+            task.commands[:, 2].abs() >= 0.5
+        )
+        # Plus ~1% pure turns from the base sampler; 4 sigma ~ 0.03.
+        assert pure_turn.float().mean().item() == pytest.approx(0.11, abs=0.03)
+    finally:
+        task._backend.close()
+
+
+def test_runs_before_turn_in_place_never_force_turns(env):
+    from types import SimpleNamespace
+
+    env.cfg.commands = SimpleNamespace(resampling_time=env.cfg.commands.resampling_time)
+    torch.manual_seed(0)
+    env._resample_commands(torch.ones(8, dtype=torch.bool))
+    assert not ((env.commands[:, :2] == 0).all(dim=1)).all()
+
+
+def test_slide_envs_still_follow_the_slide_profile(env):
+    env.cfg.commands.turn_in_place_probability = 1.0
+    env.cfg.commands.slide_probability = 1.0
+    env.domain_randomizer._resample_contact_friction = False
+    _set_friction(env, [0.1] * 8)
+    env._reset_idx(torch.ones(8, dtype=torch.bool))
+    # Run-up: slide envs hold forward speed despite turn-in-place sampling.
+    assert (env.commands[:, 0] > 0).all() and (env.commands[:, 2] == 0).all()
