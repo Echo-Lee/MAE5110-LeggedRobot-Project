@@ -35,6 +35,13 @@ class Go2LowFricCfg(Go2Cfg):
         glide_min_command = 0.3
         # Go2 foot collision sphere radius (resources/robots/go2/urdf/go2.urdf).
         foot_radius = 0.022
+        # A foot earns full glide credit once it carries this fraction of body
+        # weight (a quarter = an even share over four feet); lighter contact
+        # earns proportionally less, so scuffing feet earn little.
+        glide_full_load_fraction = 0.25
+        # Seconds of continuous load before a foot earns full glide credit
+        # (ramps up linearly), so taps and brief scuffs earn little.
+        glide_min_contact_time = 0.1
 
 
 class Go2LowFricRunnerCfg(Go2RunnerCfg):
@@ -60,6 +67,10 @@ class Go2LowFricRunnerCfg(Go2RunnerCfg):
                 # glide term) already scores 0.10 per step on ice and 0.00 on
                 # ground with it, against tracking_lin_vel's weight of 4.0.
                 glide = 1.0  # new term (default 0: absent)
+                # Each foot touchdown on low friction costs 1 x weight. The
+                # power-penalty run touched down ~32 times/s on ice (~0.32 per
+                # step, so ~-0.16); the first glide run ~57 times/s.
+                ice_touchdowns = 0.5  # new term (default 0: absent)
 
     class algorithm(Go2RunnerCfg.algorithm):
         # Initial value: 0.01 (inherited from LeggedRobotRunnerCfg).
