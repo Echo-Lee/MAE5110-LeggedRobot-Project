@@ -417,6 +417,15 @@ for both |joint work| and positive work only.
 `scripts/plot_cot_vs_friction.py` plots one panel per target speed plus the
 top-speed panel, for up to six policies.
 
+`go2_lowfric` trains run-up-and-slide episodes on ice (`commands.slide_*`):
+the command holds a forward speed for a run-up, then decays at mu*g, the
+deceleration of a body sliding on all four feet, to a stop.
+`scripts/evaluate_slide.py` measures how a policy follows that profile from
+rest: slide distance against v^2/(2 mu g), deceleration against mu*g, the
+fraction of the slide with all four feet loaded, touchdowns per second, and
+joint energy per meter. `scripts/play.py --slide V0` plays or records the
+same profile.
+
 The gate measures planar velocity RMSE, yaw-rate RMSE, target/velocity jitter
 above 10 Hz (beyond the first three gait harmonics), target clipping, swing-phase
 load, total foot support relative to body weight, contact duty, and each foot's

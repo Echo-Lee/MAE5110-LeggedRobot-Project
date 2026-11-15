@@ -102,4 +102,5 @@ pendulum_rollout.png
 notebooks/__marimo__/
 
 # Local record of changes for review
-changes.readme
+changes.md
+designNotebook.md

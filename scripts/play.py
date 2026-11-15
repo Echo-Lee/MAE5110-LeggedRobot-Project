@@ -12,6 +12,10 @@ Record a real-time MP4 of environment 0 instead of opening a viewer, on a
 chosen surface and with a fixed command (MuJoCo CPU backend):
     uv run scripts/play.py --task go2_lowfric --load_run RUN --original_cfg \
         --friction 0.1 --command 1.0 0 0 --video logs/videos/ice.mp4
+
+Run up to 1.2 m/s, then slide to a stop at the friction's natural deceleration:
+    uv run scripts/play.py --task go2_lowfric --load_run RUN --original_cfg \
+        --friction 0.1 --slide 1.2 --video logs/videos/slide.mp4
 """
 
 import argparse
@@ -100,6 +104,21 @@ def get_play_args(argv=None):
         "playback; disables keyboard teleop",
     )
     parser.add_argument(
+        "--slide",
+        type=float,
+        default=None,
+        metavar="V0",
+        help="run-up-and-slide command: hold forward speed V0 for "
+        "--slide_runup seconds, then decay it at the sliding deceleration "
+        "mu*g of each environment's friction, down to a stop",
+    )
+    parser.add_argument(
+        "--slide_runup",
+        type=float,
+        default=4.0,
+        help="run-up time before the slide starts (s); go2_lowfric trains with 4",
+    )
+    parser.add_argument(
         "--video",
         type=str,
         default=None,
@@ -133,6 +152,10 @@ def get_play_args(argv=None):
     if args.video:
         # A recording renders off-screen; no interactive viewer is opened.
         args.headless = True
+    if args.slide is not None and args.command is not None:
+        parser.error("use either --command or --slide, not both")
+    if args.slide is not None and args.slide <= 0:
+        parser.error("--slide speed must be positive")
     if args.friction is not None and args.friction <= 0:
         parser.error("--friction must be positive")
     if args.video_seconds <= 0:
@@ -159,6 +182,10 @@ def setup(args):
     if hasattr(env_cfg, "push_robots"):
         env_cfg.push_robots.toggle = False
     env_cfg.init_state.reset_mode = "reset_to_basic"
+    if hasattr(env_cfg, "commands") and hasattr(env_cfg.commands, "slide_probability"):
+        # Playback drives commands itself (keyboard, --command, --slide); no
+        # randomly chosen run-up-and-slide episodes.
+        env_cfg.commands.slide_probability = 0.0
     if hasattr(env_cfg, "viewer"):
         env_cfg.viewer.show_ui = args.viewer_ui
     if args.video:
@@ -221,21 +248,47 @@ def policy_step(env, runner, command):
     env.step()
 
 
-def play(env, runner, command=None):
+def command_schedule(env, args):
+    """Return step -> command tensor (or None to leave commands alone)."""
+    if args.command is None and args.slide is None:
+        return lambda step: None
+    if not hasattr(env, "commands"):
+        raise SystemExit(f"task {args.task} has no velocity commands")
+    if args.command is not None:
+        held = torch.tensor(args.command, device=env.device)
+        return lambda step: held
+    from gym.envs.go2.go2_lowfric import slide_speed_profile
+
+    friction = env._backend.contact_friction
+
+    def slide(step):
+        command = torch.zeros(env.num_envs, 3, device=env.device)
+        command[:, 0] = slide_speed_profile(
+            torch.tensor(step * env.dt, device=env.device),
+            args.slide,
+            friction,
+            args.slide_runup,
+        )
+        return command
+
+    return slide
+
+
+def play(env, runner, command_at):
     n_steps = 10 * int(env.max_episode_length)
-    for _ in range(n_steps):
-        policy_step(env, runner, command)
+    for step in range(n_steps):
+        policy_step(env, runner, command_at(step))
         env.check_exit()
 
 
-def record(env, runner, args, command=None):
+def record(env, runner, args, command_at):
     from gym.utils.interfaces.VideoRecorder import VideoRecorder
 
     os.makedirs(os.path.dirname(os.path.abspath(args.video)), exist_ok=True)
     recorder = VideoRecorder(env, args.video, overlay=args.overlay)
     try:
         for step in range(round(args.video_seconds / env.dt)):
-            policy_step(env, runner, command)
+            policy_step(env, runner, command_at(step))
             recorder.capture(step)
     finally:
         recorder.close()
@@ -254,11 +307,7 @@ if __name__ == "__main__":
         os.environ["MUJOCO_GL"] = "egl"
     with torch.no_grad():
         env, runner = setup(args)
-        command = None
-        if args.command is not None:
-            if not hasattr(env, "commands"):
-                raise SystemExit(f"--command: task {args.task} has no commands")
-            command = torch.tensor(args.command, device=env.device)
+        command_at = command_schedule(env, args)
         # The MuJoCo warp (GPU) backend is headless-only: render() is a no-op and
         # it has no passive viewer, so nothing draws.  Point the user at cpu.
         if (
@@ -283,6 +332,7 @@ if __name__ == "__main__":
         if (
             args.keyboard
             and args.command is None
+            and args.slide is None
             and hasattr(env, "commands")
             and not args.headless
         ):
@@ -313,6 +363,6 @@ if __name__ == "__main__":
 
                 CommandVisualizer(env)
         if args.video:
-            record(env, runner, args, command)
+            record(env, runner, args, command_at)
         else:
-            play(env, runner, command)
+            play(env, runner, command_at)

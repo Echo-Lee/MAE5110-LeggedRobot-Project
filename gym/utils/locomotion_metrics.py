@@ -204,3 +204,96 @@ def cot_at_speed(
         "cot_positive_work": None,
         "cot_positive_work_std": None,
     }
+
+
+# Speed (m/s) below which a slide counts as stopped.
+SLIDE_STOP_SPEED = 0.1
+# Control steps before the slide starts that are averaged for its entry speed.
+SLIDE_ENTRY_WINDOW = 20
+
+
+def summarize_slide(
+    trace: dict[str, torch.Tensor],
+    *,
+    dt: float,
+    slide_start_step: int,
+    friction: float,
+    stop_speed: float = SLIDE_STOP_SPEED,
+    load_threshold: float = FOOT_LOAD_THRESHOLD_N,
+) -> dict:
+    """Summarize run-up-and-slide trials on one friction coefficient.
+
+    Required trace keys (T steps, R replicas, F feet): ``alive`` [T, R]
+    bool, absorbing; ``position`` [T, R, 2] world xy; ``speed`` [T, R]
+    horizontal base speed; ``forward_speed`` [T, R] body-frame vx;
+    ``command`` [T, R] commanded forward speed; ``foot_load`` [T, R, F]
+    vertical contact force; ``power_abs`` [T, R] sum |tau*qdot| in W.
+
+    Each surviving replica's slide runs from ``slide_start_step`` until its
+    speed first drops below ``stop_speed`` (or the trace ends). On friction
+    mu nothing can stop faster than mu*g, which pure sliding on all feet
+    achieves; so a coasting slide has distance_ratio and decel_ratio near 1,
+    all four feet loaded, few touchdowns, and little joint energy, while
+    stepping to slow down shows touchdowns, energy, and a longer distance.
+    """
+    alive = trace["alive"].bool()
+    survived = alive[-1]
+    result = {
+        "friction": friction,
+        "replicas": alive.shape[1],
+        "fall_rate": 1.0 - survived.float().mean().item(),
+    }
+    keys = (
+        "stopped_rate",
+        "entry_speed_m_s",
+        "slide_distance_m",
+        "predicted_distance_m",
+        "distance_ratio",
+        "slide_duration_s",
+        "decel_ratio",
+        "all_feet_loaded_fraction",
+        "touchdowns_per_s",
+        "slide_energy_j",
+        "slide_energy_per_m_j",
+        "slide_tracking_rmse_m_s",
+    )
+    if not survived.any():
+        return result | dict.fromkeys(keys)
+    start = slide_start_step
+    loaded = trace["foot_load"] > load_threshold
+    per_replica = {key: [] for key in keys}
+    for r in torch.nonzero(survived).flatten().tolist():
+        speed = trace["speed"][:, r]
+        entry = speed[max(0, start - SLIDE_ENTRY_WINDOW) : start].mean().item()
+        below = torch.nonzero(speed[start:] < stop_speed).flatten()
+        stopped = below.numel() > 0
+        stop = start + (below[0].item() if stopped else speed.shape[0] - 1 - start)
+        stop = max(stop, start + 1)
+        window = slice(start, stop)
+        duration = (stop - start) * dt
+        distance = (trace["position"][stop, r] - trace["position"][start, r]).norm()
+        predicted = entry**2 / (2 * friction * GRAVITY_M_S2)
+        feet = loaded[window, r]
+        touchdowns = (feet[1:] & ~feet[:-1]).sum().item()
+        energy = trace["power_abs"][window, r].sum().item() * dt
+        error = trace["forward_speed"][window, r] - trace["command"][window, r]
+        values = {
+            "stopped_rate": float(stopped),
+            "entry_speed_m_s": entry,
+            "slide_distance_m": distance.item(),
+            "predicted_distance_m": predicted,
+            "distance_ratio": distance.item() / predicted if predicted else None,
+            "slide_duration_s": duration,
+            "decel_ratio": (entry / duration) / (friction * GRAVITY_M_S2),
+            "all_feet_loaded_fraction": feet.all(dim=1).float().mean().item(),
+            "touchdowns_per_s": touchdowns / duration,
+            "slide_energy_j": energy,
+            "slide_energy_per_m_j": energy / max(distance.item(), 1e-6),
+            "slide_tracking_rmse_m_s": error.square().mean().sqrt().item(),
+        }
+        for key, value in values.items():
+            per_replica[key].append(value)
+    for key, values in per_replica.items():
+        defined = [v for v in values if v is not None]
+        result[key] = sum(defined) / len(defined) if defined else None
+    return result

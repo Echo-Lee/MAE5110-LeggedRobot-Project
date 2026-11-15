@@ -9,6 +9,18 @@ from gym.utils.locomotion_metrics import (
 from gym.utils.sampling import masked_update
 
 
+def slide_speed_profile(time_s, speed, friction, runup_s, decel_scale=1.0):
+    """Commanded forward speed of a run-up-and-slide episode at ``time_s``.
+
+    Holds ``speed`` until ``runup_s``, then decays at decel_scale * mu * g,
+    the deceleration of a body sliding on all feet, down to zero. Works
+    elementwise on tensors (or broadcastable scalars).
+    """
+    decel = decel_scale * friction * GRAVITY_M_S2
+    sliding = (time_s - runup_s).clamp_min(0.0)
+    return (speed - decel * sliding).clamp_min(0.0)
+
+
 class Go2LowFric(Go2):
     """Go2 locomotion across bimodal (ice / ground) contact friction.
     the true per-environment friction is a
@@ -27,20 +39,75 @@ class Go2LowFric(Go2):
         self.foot_touchdown = torch.zeros(
             self.num_envs, num_feet, dtype=torch.bool, device=self.device
         )
+        # Run-up-and-slide episodes: which envs run one, and their run-up speed.
+        self.slide_active = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self.slide_speed = torch.zeros(self.num_envs, device=self.device)
+
+    def _slide_settings(self):
+        """The commands config if it defines slide episodes, else None.
+
+        Config snapshots saved with runs that predate slide episodes lack
+        these fields; replaying them with --original_cfg must reproduce how
+        they were trained, which is with no slide episodes.
+        """
+        commands = self.cfg.commands
+        return commands if hasattr(commands, "slide_probability") else None
 
     def _post_decimation_step(self):
-        super()._post_decimation_step()
+        super()._post_decimation_step()  # may resample commands
         loaded = self.contact_forces[:, self.feet_indices, 2] > FOOT_LOAD_THRESHOLD_N
         self.foot_touchdown = loaded & (self.foot_contact_time == 0)
         self.foot_contact_time = (self.foot_contact_time + self.dt) * loaded
+        self._apply_slide_commands()
 
     def _reset_idx(self, reset_mask):
-        super()._reset_idx(reset_mask)
+        super()._reset_idx(reset_mask)  # resamples friction, then commands
         masked_update(
             self.foot_contact_time, torch.zeros_like(self.foot_contact_time), reset_mask
         )
         masked_update(
             self.foot_touchdown, torch.zeros_like(self.foot_touchdown), reset_mask
+        )
+        self._sample_slide_episodes(reset_mask)
+        self._apply_slide_commands()
+
+    def _sample_slide_episodes(self, reset_mask):
+        """Choose which resetting envs run a run-up-and-slide episode.
+
+        Only envs whose (just resampled) friction is at most
+        slide_max_friction are eligible; each is chosen with
+        slide_probability and gets a run-up speed from slide_speed_range.
+        """
+        settings = self._slide_settings()
+        if settings is None:
+            return
+        eligible = self._backend.contact_friction <= settings.slide_max_friction
+        chosen = eligible & (
+            torch.rand(self.num_envs, device=self.device) < settings.slide_probability
+        )
+        low, high = settings.slide_speed_range
+        speed = low + (high - low) * torch.rand(self.num_envs, device=self.device)
+        masked_update(self.slide_active, chosen, reset_mask)
+        masked_update(self.slide_speed, speed, reset_mask)
+
+    def _apply_slide_commands(self):
+        """Overwrite slide envs' commands with the run-up-and-slide profile."""
+        settings = self._slide_settings()
+        if settings is None:
+            return
+        forward = slide_speed_profile(
+            self.episode_length_buf * self.dt,
+            self.slide_speed,
+            self._backend.contact_friction,
+            settings.slide_runup_time,
+            settings.slide_decel_scale,
+        )
+        profile = torch.zeros_like(self.commands)
+        profile[:, 0] = forward
+        torch.where(
+            self.slide_active.unsqueeze(1), profile, self.commands, out=self.commands
         )
 
     def _ice_gate(self):

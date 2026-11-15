@@ -12,6 +12,19 @@ class Go2LowFricCfg(Go2Cfg):
         # occur within one episode on low friction.
         episode_length_s = 10
 
+    class commands(Go2Cfg.commands):
+        # Run-up-and-slide episodes (Go2LowFric._apply_slide_commands). On
+        # ice, a fraction of episodes replace the random commands with: hold
+        # forward speed v0 for slide_runup_time, then decay the command at
+        # the rate pure sliding decelerates, v0 - slide_decel_scale*mu*g*t,
+        # down to a stop for the rest of the episode. With the power penalty,
+        # coasting on planted feet is the cheapest way to follow that decay.
+        slide_probability = 0.3  # of eligible (ice) episodes
+        slide_max_friction = 0.2  # only where mu <= this
+        slide_speed_range = [0.8, 1.3]  # v0 (m/s); mu=0.05 tops out ~1.3
+        slide_runup_time = 4.0  # s; reaching v0 on mu=0.05 takes ~3 s
+        slide_decel_scale = 1.0
+
     class domain_randomization(Go2Cfg.domain_randomization):
         class startup(Go2Cfg.domain_randomization.startup):
             contact_friction_range = [ICE_FRICTION[0], GROUND_FRICTION[1]]
@@ -63,14 +76,14 @@ class Go2LowFricRunnerCfg(Go2RunnerCfg):
                 # torque is lowest when load is shared by all legs.
                 power = 1.0e-3  # new term (default 0: absent)
                 torques = 1.5e-3  # initial value: 5.0e-6 (inherited from go2)
-                # Glide reward, in [0, 1] per step. Run Nov14_23-04-56_ (no
-                # glide term) already scores 0.10 per step on ice and 0.00 on
-                # ground with it, against tracking_lin_vel's weight of 4.0.
-                glide = 1.0  # new term (default 0: absent)
-                # Each foot touchdown on low friction costs 1 x weight. The
-                # power-penalty run touched down ~32 times/s on ice (~0.32 per
-                # step, so ~-0.16); the first glide run ~57 times/s.
-                ice_touchdowns = 0.5  # new term (default 0: absent)
+                # Glide terms, off. Trained values: glide = 1.0 (runs
+                # Nov15_04-33-19_, Nov15_05-26-38_) and ice_touchdowns = 0.5
+                # (Nov15_05-26-38_). With isotropic friction a gliding foot
+                # always brakes, so both runs were slower on ice than the
+                # power-penalty run; v2 also favored tucking a leg (fewer
+                # touchdowns). Kept available for later experiments.
+                glide = 0.0
+                ice_touchdowns = 0.0
 
     class algorithm(Go2RunnerCfg.algorithm):
         # Initial value: 0.01 (inherited from LeggedRobotRunnerCfg).

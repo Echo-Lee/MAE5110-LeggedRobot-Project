@@ -176,12 +176,14 @@ def test_touchdowns_on_ground_are_free_and_none_cost_nothing():
 # --- configuration and the real environment ---------------------------------
 
 
-def test_new_weights_are_only_in_go2_lowfric():
+def test_glide_terms_are_declared_only_in_go2_lowfric_and_switched_off():
     from gym.envs.go2.go2_config import Go2RunnerCfg
 
+    # Off after runs Nov15_04-33-19_ and Nov15_05-26-38_; zero weights are
+    # dropped by the runner, so the terms are not computed in training.
     weights = Go2LowFricRunnerCfg().critic.reward.weights
-    assert weights.glide == pytest.approx(1.0)
-    assert weights.ice_touchdowns == pytest.approx(0.5)
+    assert weights.glide == 0.0
+    assert weights.ice_touchdowns == 0.0
     go2 = Go2RunnerCfg().critic.reward.weights
     assert not hasattr(go2, "glide") and not hasattr(go2, "ice_touchdowns")
 

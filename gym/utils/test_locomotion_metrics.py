@@ -201,3 +201,81 @@ def test_wide_gap_is_not_interpolated():
     result = cot_at_speed([_point(0.2, 1.0), _point(1.6, 1.5)], 1.0, max_gap=0.5)
     assert result["status"] == "not_bracketed"
     assert result["cot"] is None
+
+
+def _slide_trace(friction=0.1, v0=1.2, replicas=2, start=50, steps=300, feet=4):
+    """Pure coasting: hold v0 until ``start``, then decelerate at mu*g."""
+    decel = friction * GRAVITY_M_S2
+    t = torch.arange(steps, dtype=torch.float) * DT
+    slide_t = (t - start * DT).clamp_min(0)
+    speed = (v0 - decel * slide_t).clamp_min(0.0)
+    x = torch.cumsum(speed * DT, dim=0)
+    rep = lambda v: v[:, None].repeat(1, replicas)  # noqa: E731
+    position = torch.zeros(steps, replicas, 2)
+    position[..., 0] = rep(x)
+    return {
+        "alive": torch.ones(steps, replicas, dtype=torch.bool),
+        "position": position,
+        "speed": rep(speed),
+        "forward_speed": rep(speed),
+        "command": rep(speed),
+        "foot_load": torch.full((steps, replicas, feet), 40.0),
+        "power_abs": torch.zeros(steps, replicas),
+    }
+
+
+def _slide(trace, friction=0.1, start=50):
+    from gym.utils.locomotion_metrics import summarize_slide
+
+    return summarize_slide(trace, dt=DT, slide_start_step=start, friction=friction)
+
+
+def test_pure_coasting_slide_matches_friction_physics():
+    result = _slide(_slide_trace())
+    assert result["fall_rate"] == 0.0 and result["stopped_rate"] == 1.0
+    assert result["entry_speed_m_s"] == pytest.approx(1.2)
+    assert result["predicted_distance_m"] == pytest.approx(
+        1.2**2 / (2 * 0.1 * GRAVITY_M_S2)
+    )
+    assert result["distance_ratio"] == pytest.approx(1.0, abs=0.05)
+    assert result["decel_ratio"] == pytest.approx(1.0, abs=0.1)
+    assert result["all_feet_loaded_fraction"] == 1.0
+    assert result["touchdowns_per_s"] == 0.0
+    assert result["slide_energy_j"] == 0.0
+    assert result["slide_tracking_rmse_m_s"] == pytest.approx(0.0)
+
+
+def test_stepping_during_the_slide_shows_touchdowns_and_energy():
+    trace = _slide_trace()
+    # One foot lifts and lands every 10 steps; joints spend 100 W.
+    for s in range(0, 300, 10):
+        trace["foot_load"][s : s + 5, :, 0] = 0.0
+    trace["power_abs"][:] = 100.0
+    result = _slide(trace)
+    assert result["all_feet_loaded_fraction"] < 0.6
+    assert result["touchdowns_per_s"] == pytest.approx(10.0, rel=0.2)
+    assert result["slide_energy_j"] == pytest.approx(100.0 * result["slide_duration_s"])
+
+
+def test_slower_than_friction_braking_has_ratios_above_and_below_one():
+    # Decelerating at half of mu*g: twice the distance, half the decel.
+    result = _slide(_slide_trace(friction=0.05), friction=0.1)
+    assert result["distance_ratio"] == pytest.approx(2.0, rel=0.06)
+    assert result["decel_ratio"] == pytest.approx(0.5, rel=0.1)
+
+
+def test_fallen_replicas_are_excluded_and_unstopped_slides_reported():
+    trace = _slide_trace(steps=120)  # ends before the robot stops
+    trace["alive"][80:, 1] = False
+    result = _slide(trace)
+    assert result["fall_rate"] == 0.5
+    assert result["stopped_rate"] == 0.0
+    assert result["entry_speed_m_s"] == pytest.approx(1.2)
+
+
+def test_all_fallen_reports_no_slide_metrics():
+    trace = _slide_trace()
+    trace["alive"][10:] = False
+    result = _slide(trace)
+    assert result["fall_rate"] == 1.0
+    assert result["distance_ratio"] is None

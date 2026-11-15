@@ -201,6 +201,9 @@ def main():
     env_cfg.env.episode_length_s = args.seconds + 1
     env_cfg.commands.resampling_time = args.seconds + 1
     env_cfg.push_robots.toggle = False
+    if hasattr(env_cfg.commands, "slide_probability"):
+        # Fixed commands are pinned below; no run-up-and-slide episodes.
+        env_cfg.commands.slide_probability = 0.0
     # Every replica starts at rest; the policy must build speed on its surface.
     env_cfg.init_state.root_vel_range = [[0.0, 0.0]] * 6
     apply_domain_randomization_override(env_cfg, "off")
