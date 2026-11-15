@@ -269,3 +269,31 @@ def test_play_slide_schedule_sets_the_phase_for_phase_aware_policies():
     assert command[:, 0].tolist() == [1.0, 1.0] and phase.tolist() == [0.0, 0.0]
     command, phase = schedule(450)  # 4.5 s: sliding
     assert (command[:, 0] < 1.0).all() and phase.tolist() == [1.0, 1.0]
+
+
+def test_slide_pose_penalizes_leaving_the_standing_pose_only_in_the_slide():
+    from types import SimpleNamespace
+
+    from gym.envs.go2.go2_lowfric import Go2LowFric
+
+    default = torch.zeros(1, 12)
+    dof_pos = torch.zeros(3, 12)
+    dof_pos[1, 7] = 0.6  # one thigh lifted 0.6 rad, sliding
+    dof_pos[2, 7] = 0.6  # same pose, not sliding
+    state = SimpleNamespace(
+        dof_pos=dof_pos,
+        default_dof_pos=default,
+        slide_phase=torch.tensor([[1.0], [1.0], [0.0]]),
+    )
+    torch.testing.assert_close(
+        Go2LowFric._reward_slide_pose(state),
+        torch.tensor([0.0, -(0.6**2) / 12, 0.0]),
+    )
+    assert Go2LowFricRunnerCfg().critic.reward.weights.slide_pose == 3.0
+
+
+def test_slide_pose_runs_on_a_real_env(env):
+    env.slide_phase[:] = 1.0
+    env.step()
+    pose = env._reward_slide_pose()
+    assert pose.shape == (8,) and (pose <= 0).all() and torch.isfinite(pose).all()

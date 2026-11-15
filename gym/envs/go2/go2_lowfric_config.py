@@ -93,6 +93,11 @@ class Go2LowFricRunnerCfg(Go2RunnerCfg):
                 # enable if the slide-phase observation alone does not make
                 # the policy coast (run Nov15_06-10-02_ stepped through it).
                 slide_still = 0.0
+                # Standing-pose hold during the slide phase only. Run
+                # Nov15_06-56-01_ scores ~0.19 rad^2 in its slides (legs
+                # splayed, rear-left leg up), so ~-0.56 per step at this
+                # weight, against ~3.5 for tracking_lin_vel.
+                slide_pose = 3.0  # new term (default 0: absent)
 
     class algorithm(Go2RunnerCfg.algorithm):
         # Initial value: 0.01 (inherited from LeggedRobotRunnerCfg).

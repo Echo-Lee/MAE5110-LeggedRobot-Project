@@ -27,11 +27,12 @@ Engineering notebook to record the process of training, assumptions, edits, and 
 | 1 | `Nov14_20-02-07_` (550 it) | Ice/ground bins, μ observation | No falls; uses μ. Lopsided diagonal stance, drift when stopped, worse tracking than `go2`. |
 | 2 | `Nov14_20-59-28_` (1500 it) | Longer training | Action noise *rose* 1.0 → 1.91; 3-legged gait; ground CoT 8.4. |
 | 3 | `Nov14_22-13-21_` | `entropy_coef` 0.01 → 0.002 | Noise settled (0.36); best ground tracking so far; still lopsided, tapping. |
-| 4 | **`Nov14_23-04-56_`** (best) | + power penalty | **29/30**; CoT 1.1–1.4; 150–220 W (was ~1000); all 4 feet, trot-like diagonal pairs emerged. |
+| 4 | **`Nov14_23-04-56_`** (best until run 8) | + power penalty | **29/30**; CoT 1.1–1.4; 150–220 W (was ~1000); all 4 feet, trot-like diagonal pairs emerged. |
 | 5 | `Nov15_04-33-19_` | + glide reward v1 | Exploited: light-load foot scuffing; slower; habit spread to ground. 13/30. |
 | 6 | `Nov15_05-26-38_` | Glide v2 (load share, persistence, touchdown penalty) | Loophole closed, but glide ignored (flat 0.016); tucked a leg; ice top speed halved. 18/30. |
 | 7 | `Nov15_06-10-02_` | Glide off; run-up-and-slide episodes | No coasting: still steps (~48 touchdowns/s), slides 2.3–4× the pure-slide distance. Lost turn-in-place; 14/30. Gains: all 4 feet, ~5 steps/s/foot, less drift. |
-| 8 | pending | Slide ends after 0.5 s hold (random commands resume); `slide_phase` observation; `slide_still` reward ready (weight 0) | Expect turn-in-place back (zero-command samples 7% → 0.8%) and a distinct slide behavior. |
+| 8 | **`Nov15_06-56-01_`** (new best) | Slide ends after 0.5 s hold; `slide_phase` observation | **28/30**, turning back; CoT 0.95–1.31 (lowest yet). Slide: 1.5–2.2× pure-slide distance, 0.61–0.78 μg, 15–35% less energy, but brakes by stepping (all-4-feet 2–6%). |
+| 9 | pending | + `slide_pose` (hold standing pose while sliding, weight 3) | Target: rear-left leg down and legs not splayed in the slide; decel → μg. |
 
 ### Result figures
 
@@ -102,6 +103,27 @@ Each run keeps the same color in every figure. Data: `logs/eval/*.json`.
    - *Gains:* all four feet carry load, stepping slowed to ~5 touchdowns/s/foot on ground (run 4: ~8–10), less drift when stopped.
    - *Next:* (a) after the slide stops, return to normal random commands (fixes the turn regression); (b) tell the policy a slide is happening, e.g. a slide-phase flag/time in the observation, and if needed a slide-phase "hold still" term (penalize joint velocity while sliding).
 
+5. **Slide phase observation** (run 8, `Nov15_06-56-01_`)
+   - *Changes:* slide ends 0.5 s after the stop and random commands resume (zero-command training samples 7% → 0.8%); `slide_phase` flag in actor and critic inputs.
+   - *Result, slide* (`logs/eval/slide_run8.json`, video `logs/videos/run8_slide_mu0.1_v1.2.mp4`), v0 = 1.2:
+
+     | μ | Entry speed | Distance (pure-slide prediction) | Decel ÷ μg | All 4 feet down | Touchdowns/s |
+     |---|---|---|---|---|---|
+     | 0.05 | 0.79 | 1.13 m (0.64) | 0.69 | 5% | 36 |
+     | 0.1 | 1.13 | 0.99 m (0.65) | 0.76 | 6% | 49 |
+     | 0.2 | 1.29 | 0.81 m (0.43) | 0.67 | 3% | 65 |
+
+   - *Observation:* the flag is used: the slide is now distinct and much better (distance 1.5–2.2× vs 2.0–4×, decel up to 0.78 μg, energy/m 134–159 vs 160–240). But it **brakes by rapid stepping**, not coasting (touchdowns rise with μ).
+   - *Fix confirmed:* turn-in-place yaw error 0.15–0.32 rad/s (run 7: ~1.0); friction grid 28/30; matched-speed CoT 0.95–1.31, the lowest of all runs.
+   - *Next (run 9):* turn on `slide_still`. In run 8's slides it scores −0.31 per step (unweighted) vs +3.5 for tracking, so weight ~2 makes holding still worth ~0.6 per step. Freezing also tracks the μg-decay command best, so the two terms agree.
+
+6. **Hold the standing pose while sliding** (run 9, pending)
+   - *Observation (run 8):* the rear-left leg is held up (thigh ~0.73 rad off the pose): 0% load walking on ice, 8% in the slide. The slide is on **three splayed legs** (hips 0.33–0.48 rad out; RMS pose deviation 0.43 rad).
+   - *Physics:* on flat ground with isotropic friction, total braking ≤ μ·m·g however the legs are placed, and standing still on sliding feet already reaches it. Splayed feet slide partly sideways, so their friction partly cancels left/right, which fits decel of only 0.67–0.78 μg. Sticking legs out does not brake harder here (no snow to dig into, no edges).
+   - *Change:* `slide_pose` = −mean (q − q_standing)² during the slide phase only, weight 3 (≈ −0.56 per step for run 8's slides vs ≈ 3.5 for tracking). Chosen instead of `slide_still` because holding a fixed pose also implies holding still. `slide_still` stays 0 so run 9 has one change.
+   - *New slide metrics:* least-used foot's load fraction (run 8: 3–13%) and RMS pose deviation (run 8: 0.41–0.44 rad).
+   - *Open:* the rear-left leg is also tucked while **walking**; `slide_pose` only acts during slides. A walking fix needs a per-foot usage term (each foot must carry load over a ~1 s window).
+
 ## Observations
 
 - **The policy uses μ:** told μ = 1 on ice, slip and CoT rise sharply. The best policy depends on it less, so a state estimator should be implemented.
@@ -115,7 +137,7 @@ Each run keeps the same color in every figure. Data: `logs/eval/*.json`.
 
 ## Open items and next steps
 
-- Train and evaluate run 8. If it still steps through the slide, set `slide_still` > 0 (run 9).
+- Run 9: `slide_pose` weight 3 (only change from run 8). If legs stay splayed, add `slide_still`; for the tucked leg while walking, a per-foot usage term.
 - Controlled stop from the goal (legs out in front, yaw torque): build on the slide phase once coasting works.
 - Sim-to-real:
   - μ / body-velocity estimator (student policy); the actor currently gets no linear velocity.

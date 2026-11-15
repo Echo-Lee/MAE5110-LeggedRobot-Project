@@ -12,7 +12,8 @@ Everything below is committed as of `03666c4`, except the **run 8** changes mark
 | `78b0fd5` | Glide reward v1, video recording, matched-speed CoT evaluation |
 | `1facc95` | Glide reward v2 (closes the foot-scuffing loophole) |
 | `03666c4` | Glide off; run-up-and-slide episodes and slide evaluation |
-| *(uncommitted)* | Run 8: slide ends after a 0.5 s hold, `slide_phase` observation, `slide_still` reward (off); legend placement in `plot_friction_eval.py` |
+| `0401678` | Run 8: slide ends after a 0.5 s hold, `slide_phase` observation, `slide_still` reward (off); legend placement in `plot_friction_eval.py` |
+| *(uncommitted)* | Run 9: `slide_pose` reward (weight 3); slide metrics `min_foot_loaded_fraction`, `pose_rmse_rad` |
 
 Run tests (`env -u PYTHONPATH` keeps the ROS Python path out of the venv):
 

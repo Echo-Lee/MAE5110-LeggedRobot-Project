@@ -67,6 +67,7 @@ def evaluate(env, runner, cases, *, replicas, runup_s, hold_s, seconds):
         "command",
         "foot_load",
         "power_abs",
+        "pose_deviation",
     )
     records = {key: [] for key in keys}
     # Policies trained with the slide-phase observation must see it set as
@@ -93,6 +94,10 @@ def evaluate(env, runner, cases, *, replicas, runup_s, hold_s, seconds):
             "command": forward,
             "foot_load": env.contact_forces[:, feet, 2],
             "power_abs": (env.torques * env.dof_vel[:, joints]).abs().sum(dim=1),
+            "pose_deviation": (env.dof_pos - env.default_dof_pos)[:, joints]
+            .square()
+            .mean(dim=1)
+            .sqrt(),
         }
         for key, value in values.items():
             records[key].append(value.clone())
@@ -120,8 +125,9 @@ def markdown_table(results) -> str:
 
     lines = [
         "| μ | v0 cmd | fell | stopped | entry v | distance (pred.) | dist ratio "
-        "| decel ratio | all 4 feet | touchdowns/s | energy (J/m) |",
-        "|---" * 11 + "|",
+        "| decel ratio | all 4 feet | least-used foot | touchdowns/s "
+        "| energy (J/m) | pose dev (rad) |",
+        "|---" * 13 + "|",
     ]
     for r in results:
         distance = (
@@ -134,8 +140,10 @@ def markdown_table(results) -> str:
             f"| {fmt(r['entry_speed_m_s'], '.2f')} | {distance} "
             f"| {fmt(r['distance_ratio'], '.2f')} | {fmt(r['decel_ratio'], '.2f')} "
             f"| {fmt(r['all_feet_loaded_fraction'], '.0%')} "
+            f"| {fmt(r['min_foot_loaded_fraction'], '.0%')} "
             f"| {fmt(r['touchdowns_per_s'], '.1f')} "
-            f"| {fmt(r['slide_energy_per_m_j'], '.0f')} |"
+            f"| {fmt(r['slide_energy_per_m_j'], '.0f')} "
+            f"| {fmt(r['pose_rmse_rad'], '.2f')} |"
         )
     return "\n".join(lines)
 

@@ -228,6 +228,8 @@ def summarize_slide(
     horizontal base speed; ``forward_speed`` [T, R] body-frame vx;
     ``command`` [T, R] commanded forward speed; ``foot_load`` [T, R, F]
     vertical contact force; ``power_abs`` [T, R] sum |tau*qdot| in W.
+    Optional ``pose_deviation`` [T, R]: RMS joint deviation from the
+    standing pose (rad), reported as ``pose_rmse_rad``.
 
     Each surviving replica's slide runs from ``slide_start_step`` until its
     speed first drops below ``stop_speed`` (or the trace ends). On friction
@@ -252,10 +254,12 @@ def summarize_slide(
         "slide_duration_s",
         "decel_ratio",
         "all_feet_loaded_fraction",
+        "min_foot_loaded_fraction",
         "touchdowns_per_s",
         "slide_energy_j",
         "slide_energy_per_m_j",
         "slide_tracking_rmse_m_s",
+        "pose_rmse_rad",
     )
     if not survived.any():
         return result | dict.fromkeys(keys)
@@ -286,10 +290,17 @@ def summarize_slide(
             "slide_duration_s": duration,
             "decel_ratio": (entry / duration) / (friction * GRAVITY_M_S2),
             "all_feet_loaded_fraction": feet.all(dim=1).float().mean().item(),
+            # The least-used foot: ~0 when a leg is held up through the slide.
+            "min_foot_loaded_fraction": feet.float().mean(dim=0).min().item(),
             "touchdowns_per_s": touchdowns / duration,
             "slide_energy_j": energy,
             "slide_energy_per_m_j": energy / max(distance.item(), 1e-6),
             "slide_tracking_rmse_m_s": error.square().mean().sqrt().item(),
+            "pose_rmse_rad": (
+                trace["pose_deviation"][window, r].mean().item()
+                if "pose_deviation" in trace
+                else None
+            ),
         }
         for key, value in values.items():
             per_replica[key].append(value)

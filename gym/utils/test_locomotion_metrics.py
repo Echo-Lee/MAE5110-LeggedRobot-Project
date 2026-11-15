@@ -279,3 +279,16 @@ def test_all_fallen_reports_no_slide_metrics():
     result = _slide(trace)
     assert result["fall_rate"] == 1.0
     assert result["distance_ratio"] is None
+
+
+def test_tucked_leg_and_pose_deviation_are_reported():
+    trace = _slide_trace()
+    trace["foot_load"][:, :, 2] = 0.0  # rear-left foot held up throughout
+    trace["pose_deviation"] = torch.full(trace["speed"].shape, 0.3)
+    result = _slide(trace)
+    assert result["min_foot_loaded_fraction"] == 0.0
+    assert result["all_feet_loaded_fraction"] == 0.0
+    assert result["pose_rmse_rad"] == pytest.approx(0.3)
+    # Without the optional trace the pose metric is simply absent.
+    assert _slide(_slide_trace())["pose_rmse_rad"] is None
+    assert _slide(_slide_trace())["min_foot_loaded_fraction"] == 1.0

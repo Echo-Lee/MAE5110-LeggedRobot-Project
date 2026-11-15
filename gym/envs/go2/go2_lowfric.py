@@ -151,6 +151,19 @@ class Go2LowFric(Go2):
         normalized = self.dof_vel / self.scales["dof_vel"]
         return -self.slide_phase[:, 0] * normalized.square().mean(dim=1)
 
+    def _reward_slide_pose(self):
+        """Penalize leaving the standing pose during the slide phase (else 0).
+
+        Mean squared joint deviation from the default standing pose (rad^2),
+        times the slide-phase flag. On flat ground with isotropic friction,
+        standing still on sliding feet already gives the maximum braking,
+        mu*g; splaying legs only makes feet slide partly sideways, wasting
+        friction. Run Nov15_06-56-01_ slid on three splayed legs with the
+        rear-left leg held up (thigh ~0.73 rad off the pose).
+        """
+        deviation = self.dof_pos - self.default_dof_pos
+        return -self.slide_phase[:, 0] * deviation.square().mean(dim=1)
+
     def _ice_gate(self):
         """~1 on low friction, ~0 on high: sigmoid((threshold - mu) / width).
 
