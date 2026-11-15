@@ -361,6 +361,7 @@ def test_runs_before_the_residual_hold_keep_full_authority(env):
 
 def test_turn_in_place_zeroes_translation_and_keeps_a_clear_turn(env):
     env.cfg.commands.turn_in_place_probability = 1.0
+    env.cfg.commands.turn_in_place_min_friction = None
     env.commands[:] = 7.0
     mask = torch.zeros(8, dtype=torch.bool)
     mask[[0, 3, 5]] = True
@@ -379,10 +380,11 @@ def test_turn_in_place_fraction_matches_the_setting():
     cfg.env.num_envs = 2000
     cfg.seed = 5
     cfg.commands.slide_probability = 0.0
+    assert cfg.commands.turn_in_place_probability == pytest.approx(0.1)
+    cfg.commands.turn_in_place_min_friction = None  # every surface here
     task_registry.convert_frequencies_to_params(cfg, Go2LowFricRunnerCfg())
     task = Go2LowFric(cfg, "cpu", True, select_backend(cfg, "cpu", "mujoco"))
     try:
-        assert cfg.commands.turn_in_place_probability == pytest.approx(0.1)
         task._resample_commands(torch.ones(2000, dtype=torch.bool))
         pure_turn = (task.commands[:, :2] == 0).all(dim=1) & (
             task.commands[:, 2].abs() >= 0.5
@@ -410,3 +412,35 @@ def test_slide_envs_still_follow_the_slide_profile(env):
     env._reset_idx(torch.ones(8, dtype=torch.bool))
     # Run-up: slide envs hold forward speed despite turn-in-place sampling.
     assert (env.commands[:, 0] > 0).all() and (env.commands[:, 2] == 0).all()
+
+
+def test_ground_only_turn_in_place_skips_ice(env):
+    assert env.cfg.commands.turn_in_place_min_friction == pytest.approx(0.6)
+    env.cfg.commands.turn_in_place_probability = 1.0
+    _set_friction(env, [0.05, 0.1, 0.2, 0.59, 0.6, 0.8, 1.0, 1.2])
+    env.commands[:] = 7.0
+    env._resample_commands(torch.ones(8, dtype=torch.bool))
+    pure_turn = (env.commands[:, :2] == 0).all(dim=1)
+    assert pure_turn.tolist() == [False] * 4 + [True] * 4
+
+
+def test_ground_only_uses_true_friction_not_the_observation(env):
+    env.cfg.commands.turn_in_place_probability = 1.0
+    _set_friction(env, [0.1] * 8)
+    env.contact_friction = torch.full((8, 1), 1.0)  # policy told "ground"
+    env._resample_commands(torch.ones(8, dtype=torch.bool))
+    assert not (env.commands[:, :2] == 0).all(dim=1).any()
+
+
+def test_run_13_snapshots_without_the_limit_turn_everywhere(env):
+    settings = env.cfg.commands
+    from types import SimpleNamespace
+
+    env.cfg.commands = SimpleNamespace(
+        resampling_time=settings.resampling_time,
+        turn_in_place_probability=1.0,
+        turn_in_place_min_yaw=settings.turn_in_place_min_yaw,
+    )
+    _set_friction(env, [0.05] * 8)
+    env._resample_commands(torch.ones(8, dtype=torch.bool))
+    assert (env.commands[:, :2] == 0).all()

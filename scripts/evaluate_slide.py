@@ -14,10 +14,14 @@ summarize_slide in gym/utils/locomotion_metrics.py).
 
 Works for any Go2-family checkpoint, including runs trained without slide
 episodes, so a policy's slide can be compared before and after training it.
+Off-nominal conditions (random trigger time, messy entry, pushes, sensor
+noise, a wrong friction estimate, randomized robot properties) are set with
+SlidePerturbations; scripts/evaluate_slide_robustness.py runs them as a suite.
 """
 
 import argparse
 import copy
+from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
@@ -42,8 +46,125 @@ RUNUP_SPEEDS = (0.8, 1.2)
 SETTLE_S = 2.0
 
 
+@dataclass
+class SlidePerturbations:
+    """Off-nominal conditions for a slide trial (defaults = nominal).
+
+    runup_range: (low, high) s; each replica's run-up length is drawn
+        uniformly, so slides start at different times and gait phases.
+    entry_lateral, entry_yaw: sideways speed (m/s) and turn rate (rad/s)
+        commanded during the run-up, so the slide starts while moving
+        sideways or turning.
+    push_speed, push_delay: a sideways velocity kick (m/s, perpendicular to
+        the direction of travel, random side) push_delay seconds after the
+        slide starts.
+    noise: physical-unit standard deviation per observation name, added to
+        the actor's observations every step (sensor noise).
+    friction_error: the policy is told mu * U(1 - e, 1 + e) instead of the
+        true mu (a friction estimate that is off by up to e).
+    """
+
+    runup_range: tuple[float, float] | None = None
+    entry_lateral: float = 0.0
+    entry_yaw: float = 0.0
+    push_speed: float = 0.0
+    push_delay: float = 0.3
+    noise: dict | None = None
+    friction_error: float = 0.0
+
+
+def make_slide_env(
+    *,
+    task,
+    load_run,
+    original_cfg,
+    experiment_name,
+    checkpoint,
+    device,
+    backend,
+    seed,
+    frictions,
+    num_envs,
+    seconds,
+    randomize_robot=False,
+):
+    """Build the env and load the policy for slide trials.
+
+    Friction is pinned per environment by the caller. With randomize_robot,
+    the task's training randomization of link masses and PD gains is kept
+    (friction randomization still off); otherwise all randomization is off.
+    """
+    import gym.envs  # noqa: F401
+
+    env_cfg, train_cfg = copy.deepcopy(
+        task_registry.get_cfgs(
+            task,
+            original_cfg=original_cfg,
+            experiment_name=experiment_name,
+            load_run=load_run if original_cfg else None,
+        )
+    )
+    experiment = experiment_name or train_cfg.runner.experiment_name
+    env_cfg.env.num_envs = num_envs
+    env_cfg.env.episode_length_s = seconds + 1
+    env_cfg.commands.resampling_time = seconds + 1
+    env_cfg.push_robots.toggle = False
+    if hasattr(env_cfg.commands, "slide_probability"):
+        # The slide profile is pinned by the caller; no random episodes.
+        env_cfg.commands.slide_probability = 0.0
+    if hasattr(env_cfg.commands, "turn_in_place_probability"):
+        env_cfg.commands.turn_in_place_probability = 0.0
+    env_cfg.init_state.root_vel_range = [[0.0, 0.0]] * 6
+    if not randomize_robot:
+        apply_domain_randomization_override(env_cfg, "off")
+    startup = env_cfg.domain_randomization.startup
+    startup.contact_friction_range = [min(frictions), max(frictions)]
+    startup.contact_friction_bins = None
+    startup.contact_friction_bin_weights = None
+    env_cfg.domain_randomization.episode.resample_contact_friction = False
+    env_cfg.seed = seed
+    train_cfg.runner.device = device
+    train_cfg.runner.resume = False
+    train_cfg.logging.enable_local_saving = False
+    train_cfg.log_dir = None
+    task_registry.convert_frequencies_to_params(env_cfg, train_cfg)
+    set_seed(seed)
+    load_index = -1 if str(load_run) == "-1" else load_run
+    path = Path(get_load_path(experiment, load_run=load_index, checkpoint=checkpoint))
+    env = task_registry.make_env(task, env_cfg, device, True, backend)
+    runner = task_registry.make_alg_runner(env, train_cfg)
+    runner.load(path, load_optimizer=False)
+    runner.switch_to_eval()
+    return env, runner, env_cfg, train_cfg, path
+
+
+def _push_direction(env, generator):
+    """Unit vector perpendicular to travel, on a random side per env."""
+    velocity = env.root_states[:, 7:9]
+    heading = velocity / velocity.norm(dim=1, keepdim=True).clamp_min(1e-6)
+    side = torch.where(
+        torch.rand(env.num_envs, device=env.device, generator=generator) < 0.5,
+        -1.0,
+        1.0,
+    )
+    return torch.stack((-heading[:, 1], heading[:, 0]), dim=1) * side.unsqueeze(1)
+
+
 @torch.no_grad()
-def evaluate(env, runner, cases, *, replicas, runup_s, hold_s, seconds):
+def evaluate(
+    env,
+    runner,
+    cases,
+    *,
+    replicas,
+    runup_s,
+    hold_s,
+    seconds,
+    perturb=None,
+    seed=0,
+):
+    perturb = perturb or SlidePerturbations()
+    generator = torch.Generator(device=env.device).manual_seed(seed)
     num_envs = len(cases) * replicas
     frictions = torch.tensor(
         [friction for friction, _ in cases], device=env.device
@@ -51,14 +172,39 @@ def evaluate(env, runner, cases, *, replicas, runup_s, hold_s, seconds):
     speeds = torch.tensor(
         [speed for _, speed in cases], device=env.device
     ).repeat_interleave(replicas)
+    if perturb.runup_range is None:
+        runups = torch.full((num_envs,), float(runup_s), device=env.device)
+    else:
+        low, high = perturb.runup_range
+        runups = low + (high - low) * torch.rand(
+            num_envs, device=env.device, generator=generator
+        )
+    # Snap run-ups to control steps so the trace's slide start is exact.
+    runups = torch.round(runups / env.dt) * env.dt
     env._backend.set_contact_friction(
         torch.arange(num_envs, device=env.device), frictions
     )
     env.reset()
 
+    observes_phase = "slide_phase" in runner.actor_cfg["obs"]
+    observes_friction = "contact_friction" in runner.actor_cfg["obs"]
+    if perturb.friction_error and observes_friction:
+        error = perturb.friction_error
+        told = frictions * (
+            1.0
+            + error
+            * (2.0 * torch.rand(num_envs, device=env.device, generator=generator) - 1)
+        )
+        # Replace the live view: the policy reads this, physics keeps mu.
+        env.contact_friction = told.unsqueeze(1)
+    if perturb.noise:
+        noise_scale = runner.get_noise(runner.actor_cfg["obs"], perturb.noise)
+
     feet = env.feet_indices
     joints = env.actuated_dof_indices
     alive = torch.ones(num_envs, device=env.device, dtype=torch.bool)
+    pushed = torch.zeros(num_envs, device=env.device, dtype=torch.bool)
+    push_time = runups + perturb.push_delay
     keys = (
         "alive",
         "position",
@@ -70,19 +216,32 @@ def evaluate(env, runner, cases, *, replicas, runup_s, hold_s, seconds):
         "pose_deviation",
     )
     records = {key: [] for key in keys}
-    # Policies trained with the slide-phase observation must see it set as
-    # in training; older policies have no such input.
-    observes_phase = "slide_phase" in runner.actor_cfg["obs"]
     for step in range(round(seconds / env.dt)):
         time_s = torch.tensor(step * env.dt, device=env.device)
-        forward = slide_speed_profile(time_s, speeds, frictions, runup_s)
+        forward = slide_speed_profile(time_s, speeds, frictions, runups)
+        running_up = time_s < runups
         env.commands[:] = 0.0
         env.commands[:, 0] = forward
+        env.commands[:, 1] = perturb.entry_lateral * running_up
+        env.commands[:, 2] = perturb.entry_yaw * running_up
         if observes_phase:
             env.slide_phase[:, 0] = slide_phase_profile(
-                time_s, speeds, frictions, runup_s, hold_s
+                time_s, speeds, frictions, runups, hold_s
             ).float()
-        actions = runner.get_inference_actions()
+        if perturb.push_speed:
+            due = (~pushed) & (time_s >= push_time)
+            if due.any():
+                kick = perturb.push_speed * _push_direction(env, generator)
+                env.root_states[:, 7:9] += kick * due.unsqueeze(1)
+                env._backend.set_all_root_states()
+                pushed |= due
+        observation = runner.get_obs(runner.actor_cfg["obs"])
+        if perturb.noise:
+            noise = noise_scale * torch.randn(
+                observation.shape, device=env.device, generator=generator
+            )
+            observation = observation + noise
+        actions = runner.alg.actor.act_inference(observation)
         runner.set_actions(runner.actor_cfg["actions"], actions)
         env.step()
         alive &= ~env.terminated
@@ -105,18 +264,27 @@ def evaluate(env, runner, cases, *, replicas, runup_s, hold_s, seconds):
     if not all(torch.isfinite(value.float()).all() for value in trace.values()):
         raise RuntimeError("Nonfinite evaluation trajectory")
 
+    # Commands are set before step k, which the trace records at k.
+    starts = torch.round(runups / env.dt).long().cpu()
     results = []
     for i, (friction, speed) in enumerate(cases):
         selection = slice(i * replicas, (i + 1) * replicas)
         result = summarize_slide(
             {key: value[:, selection] for key, value in trace.items()},
             dt=env.dt,
-            # Commands are set before step k, which the trace records at k.
-            slide_start_step=round(runup_s / env.dt),
+            slide_start_step=starts[selection].tolist(),
             friction=friction,
         )
         results.append({"runup_command_m_s": speed} | result)
     return results
+
+
+def trial_seconds(frictions, speeds, runup_s, perturb=None):
+    """Simulated seconds that cover the latest run-up and slowest stop."""
+    perturb = perturb or SlidePerturbations()
+    latest = max(perturb.runup_range) if perturb.runup_range else runup_s
+    longest_slide = max(speeds) / (min(frictions) * GRAVITY_M_S2)
+    return latest + longest_slide + SETTLE_S
 
 
 def markdown_table(results) -> str:
@@ -149,6 +317,16 @@ def markdown_table(results) -> str:
     return "\n".join(lines)
 
 
+def checkpoint_metadata(path):
+    return {
+        "checkpoint": str(path.resolve()),
+        "checkpoint_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "revision": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True
+        ).strip(),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -176,49 +354,22 @@ def main():
     args = parser.parse_args()
     if min(args.frictions) <= 0 or min(args.speeds) <= 0 or args.runup <= 0:
         parser.error("frictions, speeds and run-up time must be positive")
-    load_run = -1 if args.load_run == "-1" else args.load_run
-    import gym.envs  # noqa: F401
-
-    env_cfg, train_cfg = copy.deepcopy(
-        task_registry.get_cfgs(
-            args.task,
-            original_cfg=args.original_cfg,
-            experiment_name=args.experiment_name,
-            load_run=args.load_run if args.original_cfg else None,
-        )
-    )
-    experiment = args.experiment_name or train_cfg.runner.experiment_name
-    longest_slide = max(args.speeds) / (min(args.frictions) * GRAVITY_M_S2)
-    seconds = args.runup + longest_slide + SETTLE_S
+    seconds = trial_seconds(args.frictions, args.speeds, args.runup)
     cases = [(f, s) for f in args.frictions for s in args.speeds]
-    env_cfg.env.num_envs = len(cases) * args.replicas
-    env_cfg.env.episode_length_s = seconds + 1
-    env_cfg.commands.resampling_time = seconds + 1
-    env_cfg.push_robots.toggle = False
-    if hasattr(env_cfg.commands, "slide_probability"):
-        # The slide profile is pinned below; no randomly chosen episodes.
-        env_cfg.commands.slide_probability = 0.0
-    env_cfg.init_state.root_vel_range = [[0.0, 0.0]] * 6
-    apply_domain_randomization_override(env_cfg, "off")
-    env_cfg.domain_randomization.startup.contact_friction_range = [
-        min(args.frictions),
-        max(args.frictions),
-    ]
-    env_cfg.seed = args.seed
-    train_cfg.runner.device = args.device
-    train_cfg.runner.resume = False
-    train_cfg.logging.enable_local_saving = False
-    train_cfg.log_dir = None
-    task_registry.convert_frequencies_to_params(env_cfg, train_cfg)
-    set_seed(args.seed)
-    path = Path(
-        get_load_path(experiment, load_run=load_run, checkpoint=args.checkpoint)
+    env, runner, env_cfg, train_cfg, path = make_slide_env(
+        task=args.task,
+        load_run=args.load_run,
+        original_cfg=args.original_cfg,
+        experiment_name=args.experiment_name,
+        checkpoint=args.checkpoint,
+        device=args.device,
+        backend=args.backend,
+        seed=args.seed,
+        frictions=args.frictions,
+        num_envs=len(cases) * args.replicas,
+        seconds=seconds,
     )
-    env = task_registry.make_env(args.task, env_cfg, args.device, True, args.backend)
     try:
-        runner = task_registry.make_alg_runner(env, train_cfg)
-        runner.load(path, load_optimizer=False)
-        runner.switch_to_eval()
         results = evaluate(
             env,
             runner,
@@ -227,6 +378,7 @@ def main():
             runup_s=args.runup,
             hold_s=args.hold,
             seconds=seconds,
+            seed=args.seed,
         )
     finally:
         env._backend.close()
@@ -234,11 +386,7 @@ def main():
         "protocol": PROTOCOL,
         "label": args.label or f"{args.task}/{path.parent.name}",
         "task": args.task,
-        "checkpoint": str(path.resolve()),
-        "checkpoint_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        "revision": subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], text=True
-        ).strip(),
+        **checkpoint_metadata(path),
         "stop_speed_m_s": SLIDE_STOP_SPEED,
         "arguments": vars(args) | {"output": str(args.output)},
         "env_config": class_to_dict(env_cfg),

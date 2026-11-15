@@ -312,3 +312,14 @@ def test_slide_separates_steps_from_chatter():
     result = _slide(trace)
     assert result["touchdowns_per_s"] == 0.0
     assert result["contact_breaks_per_s"] > 20.0
+
+
+def test_slides_may_start_at_a_different_step_per_replica():
+    from gym.utils.locomotion_metrics import summarize_slide
+
+    early = _slide_trace(replicas=1, start=30)
+    late = _slide_trace(replicas=1, start=70)
+    trace = {key: torch.cat((early[key], late[key]), dim=1) for key in early}
+    result = summarize_slide(trace, dt=DT, slide_start_step=[30, 70], friction=0.1)
+    assert result["distance_ratio"] == pytest.approx(1.0, abs=0.05)
+    assert result["entry_speed_m_s"] == pytest.approx(1.2)

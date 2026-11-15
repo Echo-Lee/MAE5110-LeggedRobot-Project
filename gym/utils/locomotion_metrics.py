@@ -237,7 +237,7 @@ def summarize_slide(
     trace: dict[str, torch.Tensor],
     *,
     dt: float,
-    slide_start_step: int,
+    slide_start_step,
     friction: float,
     stop_speed: float = SLIDE_STOP_SPEED,
     load_threshold: float = FOOT_LOAD_THRESHOLD_N,
@@ -253,7 +253,10 @@ def summarize_slide(
     Optional ``pose_deviation`` [T, R]: RMS joint deviation from the
     standing pose (rad), reported as ``pose_rmse_rad``.
 
-    Each surviving replica's slide runs from ``slide_start_step`` until its
+    ``slide_start_step`` is one step index for all replicas, or a sequence
+    with one per replica (slides triggered at different times).
+
+    Each surviving replica's slide runs from its start step until its
     speed first drops below ``stop_speed`` (or the trace ends). On friction
     mu nothing can stop faster than mu*g, which pure sliding on all feet
     achieves; so a coasting slide has distance_ratio and decel_ratio near 1,
@@ -290,10 +293,15 @@ def summarize_slide(
     )
     if not survived.any():
         return result | dict.fromkeys(keys)
-    start = slide_start_step
+    starts = (
+        [int(slide_start_step)] * alive.shape[1]
+        if isinstance(slide_start_step, int)
+        else [int(step) for step in slide_start_step]
+    )
     loaded = trace["foot_load"] > load_threshold
     per_replica = {key: [] for key in keys}
     for r in torch.nonzero(survived).flatten().tolist():
+        start = starts[r]
         speed = trace["speed"][:, r]
         entry = speed[max(0, start - SLIDE_ENTRY_WINDOW) : start].mean().item()
         below = torch.nonzero(speed[start:] < stop_speed).flatten()

@@ -20,9 +20,14 @@ class Go2LowFricCfg(Go2Cfg):
         # down to a stop for the rest of the episode. With the power penalty,
         # coasting on planted feet is the cheapest way to follow that decay.
         # Fraction of command resamples that become pure turn-in-place (zero
-        # forward/sideways speed). Without it pure turns are ~1% of commands
-        # and both residual-hold seeds failed turn-in-place (runs 12, 12b).
+        # forward/sideways speed). Run 14: 0.1 on ground only. On every
+        # surface (runs 13, 13b: Nov15_20-06-14_, Nov15_20-55-40_) the slide
+        # became fragile on both seeds (robustness 0/9, falls at mu 0.15-0.2,
+        # vs 8/9 for runs 12/12b) and turning was fixed on only one seed.
         turn_in_place_probability = 0.1
+        # Only envs with friction >= this get turn-in-place commands (the
+        # ground bin starts at 0.6); ice keeps run 12's command mix.
+        turn_in_place_min_friction = 0.6
         turn_in_place_min_yaw = 0.5  # rad/s; avoids near-zero "turns"
         slide_probability = 0.3  # of eligible (ice) episodes
         slide_max_friction = 0.2  # only where mu <= this

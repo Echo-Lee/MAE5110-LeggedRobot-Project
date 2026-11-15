@@ -17,6 +17,7 @@ Engineering notebook to record the process of training, assumptions, edits, and 
 - **Friction grid** (`evaluate_go2_friction.py`): 7 μ × 6 commands; falls, tracking, slip ratio, CoT, touchdowns per meter; 30 graded cases (ice and ground). `--misreport_friction` tells the policy the wrong μ, to test its reliance on it.
 - **Matched-speed CoT** (`evaluate_cot_vs_friction.py`): CoT at exact *actual* speeds. Policies don't hold commanded speed, so a fixed command isn't a fixed speed.
 - **Slide** (`evaluate_slide.py`): run-up then a μg-decay command; distance and deceleration vs friction physics, feet down, touchdowns, energy.
+- **Slide robustness** (`evaluate_slide_robustness.py`): the slide evaluation under 9 scenarios (nominal, randomized robot, random trigger time, entry speeds 0.5/1.0/1.5, sideways + turning entry, mid-slide push, sensor noise, ±30% wrong μ, combined) on μ 0.05–0.2 plus untrained μ 0.3. Pass = no falls, mean decel ≥ 0.75 μg, distance ratio ≤ 1.5, decel within 10% of nominal; push scenarios graded on falls only (the kick adds speed after entry speed is measured, which biases the ratios).
 - **Per-foot check and videos** (`play.py --friction --command/--slide --video`): show *how* it moves, e.g. tucked legs and tapping, which the averages hide.
 
 ## Experiment log
@@ -37,7 +38,9 @@ Engineering notebook to record the process of training, assumptions, edits, and 
 | 11 | `Nov15_18-40-46_` | `slide_still` 3 → 0; `slide_pose` 3 → 10 | Slide decel 0.75–0.87 μg (slightly ↑) but pose dev 0.32–0.36 rad (worse than run 9) and more steps; walking much worse: 22/30, CoT at 1 m/s 1.95–3.29, ground turning broken. Run 9 stays best. |
 | 12 | **`Nov15_19-11-13_`** (best slide) | Run 9 weights + residual hold (slide-phase targets × 0.2) | Best learned slide: distance 1.27–1.45× ideal, decel 0.65–0.87 μg, all 4 feet down 45–65%, pose dev 0.18–0.20, no falls at any μ. Walking 25/30 (turn-in-place weaker); CoT at 1 m/s 0.82 on ice (lowest yet); top speed 2.32 m/s at μ = 1. |
 | 12b | `Nov15_19-31-15_` | Run 12 repeated (different random seed) | Slide reproduces (decel 0.80 vs 0.78 μg mean, no falls). Walking: 19/30 (run 12: 25); turn-in-place fails in both seeds; top speed on ice 1.72 vs 1.06 m/s. |
-| 13 | pending (2 seeds: `--seed 1`, `--seed 2`) | Run 12 + 10% pure turn-in-place commands | Target: turn-in-place passes on both seeds; slide unchanged (~0.8 μg, no falls). Pure-turn samples 1.3% → 10.4%. |
+| 13 | `Nov15_20-06-14_` (seed 7263, random) | Run 12 + 10% pure turn-in-place commands | **Turning fixed**: 28/30, turn-in-place 0.11–0.28 rad/s, all turn cases pass; CoT at 1 m/s 0.74–1.24 (best yet). Slide good on μ ≤ 0.1 (like run 12) but **worse at μ ≥ 0.15**: decel 0.38–0.41 μg and 50% falls at μ = 0.2, v0 = 1.2. One seed only. |
+| 13b | `Nov15_20-55-40_` (seed 4939, random) | Run 13 repeated | Robustness suite 0/9 (falls at μ = 0.15–0.2 up to 75%); walking 19/30, turn-in-place fails on ground (0.54–0.58 rad/s). Confirms run 13's config makes the slide fragile and does not reliably fix turning. |
+| 14 | pending (2 seeds) | Run 12 + 10% turn-in-place on ground only (μ ≥ 0.6) | Ice keeps run 12's mix (pure turns 1.2%); ground 10.7%. Pass: robustness ≥ 8/9 on both seeds, ground turn-in-place fixed, walking grid not worse than 12/12b. |
 
 ### Result figures
 
@@ -212,10 +215,41 @@ Each run keeps the same color in every figure. Data: `logs/eval/*.json`.
    - *Lesson:* compare configurations on per-friction means over cases, and on ≥ 2 seeds for walking claims. `train.py` now saves `seed.json` in every run folder (`--seed` to fix it).
    - *Visual check:* the run-up-and-slide videos look good: the robot runs up, plants all four feet near the standing pose, and slides to a stop. The remaining issues are in the numbers (braking ~0.8 μg, turning), not visible failures.
 
-10. **Turn-in-place commands** (run 13, pending, 2 seeds)
+10. **Turn-in-place commands** (run 13, `Nov15_20-06-14_`, seed 7263)
    - *Change:* `commands.turn_in_place_probability = 0.1`: that fraction of command resamples become pure turns (forward/sideways 0, |yaw| ≥ `turn_in_place_min_yaw` = 0.5 rad/s). Applies at reset, the 3 s resamples, and when a slide ends; slide episodes still override their own commands. Pure-turn training samples 1.3% → 10.4%.
    - *Why:* both residual-hold seeds fail turn-in-place; pure turns were ~1% of commands and slide episodes add long straight, zero-yaw stretches.
-   - *Plan:* train with `--seed 1` and `--seed 2`; compare seed means against runs 12/12b.
+   - *Plan:* train with `--seed 1` and `--seed 2`; compare seed means against runs 12/12b. (Only one run came back, random seed 7263, now recorded in its `seed.json`.)
+   - *Result, walking:* 28/30 (runs 12/12b: 25/19); turn-in-place yaw error 0.28 / 0.24 / 0.16 / 0.11 / 0.12 rad/s at μ = 0.05 / 0.1 / 0.2 / 0.8 / 1 (run 12: 0.56 / 0.50 / 0.36 / 0.11 / 0.67); only forward_fast on ice fails (physically limited). CoT at 1 m/s 0.74–1.24, the lowest yet. Top speed 1.10 / 2.21 m/s at μ = 0.05 / 1.
+   - *Result, slide* (`logs/eval/slide_run13.json`), means over the 10 cases vs run 12 / 12b: distance 1.54 (1.35 / 1.42), decel 0.69 μg (0.78 / 0.80), all 4 feet 42% (56% / 53%), energy/m 171 (103 / 132). By friction: μ ≤ 0.1 is as good as run 12 (distance 1.31–1.42, decel 0.70–0.85, 0% falls); μ = 0.15–0.2 is worse: decel 0.38–0.71 and **50% falls at μ = 0.2, v0 = 1.2** (runs 12/12b: 0%). Videos: `logs/videos/run13_slide_mu0.1_v1.2.mp4` (good), `logs/videos/run13_slide_mu0.2_v1.2.mp4` (fall).
+   - *Interpretation:* turning is fixed. The μ = 0.2 slide regression could be seed variance (one run) or a real trade-off; μ = 0.2 is the hardest slide case (most braking torque, the edge of the slide training range) and was already the weakest in runs 12/12b.
+
+11. **Robustness suite** (stage 1 hardening)
+   - *Built:* `scripts/evaluate_slide_robustness.py` (see Evaluation tools) on a refactored `evaluate_slide.py` (`SlidePerturbations`: random run-up, entry sideways/turn, push, sensor noise, μ estimate error, randomized robot; per-replica slide start in `summarize_slide`). Refactor check: run 13's nominal slide reproduces on ice within 0.02; μ 0.15–0.2 cases differ more because behavior there is borderline and sensitive to the initial pose.
+   - *Results* (scenarios passed / 9; `logs/eval/robustness_run*.json`):
+
+     | Run | Passed | Falls (any scenario, μ ≤ 0.2) | Notes |
+     |---|---|---|---|
+     | 12 (`Nov15_19-11-13_`) | 8/9 | 12% in *combined* at μ = 0.1 only | no falls even at untrained μ = 0.3 |
+     | 12b (`Nov15_19-31-15_`) | 8/9 | none | fails *entry_speeds* on distance (1.60 at v0 = 1.5) |
+     | 13 (`Nov15_20-06-14_`) | 0/9 | 12–100% at μ = 0.15–0.2 in every scenario | slide at μ ≥ 0.15 breaks down |
+
+   - *Conclusions:* (1) Run 12's configuration gives a **robust slide on both seeds**: no falls under robot randomization, random trigger times, entry speeds 0.5–1.5, messy entry, pushes, sensor noise, or a ±30% wrong μ, and braking stays at 0.77–0.89 μg in all non-push scenarios. (2) Pushes reduce braking (0.63–0.70 μg) but cause no falls on 12b. (3) Run 13 (turn-in-place commands) is fragile at μ ≥ 0.15 in every scenario, while both run-12 seeds are robust: likely the turn-in-place change, not seed noise, but a second run-13 seed would confirm.
+   - *Second seed of run 13 (13b, `Nov15_20-55-40_`):* robustness 0/9 again (worst fall 75% at μ ≤ 0.2, nominal decel 0.72 μg); walking 19/30 with turn-in-place failing on ground (0.54 / 0.58 rad/s at μ = 0.8 / 1).
+
+     | Config | Seed | Robustness passed | Worst fall μ ≤ 0.2 | Walking grid | Turn-in-place yaw err μ 0.05 / 1 |
+     |---|---|---|---|---|---|
+     | Run 12 (no turn-in-place) | a | 8/9 | 12% | 25/30 | 0.56 / 0.67 |
+     | Run 12 | b | 8/9 | 0% | 19/30 | 0.80 / 0.48 |
+     | Run 13 (10% turn-in-place) | a | 0/9 | 100% | 28/30 | 0.28 / 0.12 |
+     | Run 13 | b | 0/9 | 75% | 19/30 | 0.34 / 0.58 |
+
+   - *Conclusions:* (1) **Turn-in-place commands make the slide fragile** on both seeds (0/9 vs 8/9), so it is the config, not the seed. (2) They **do not reliably fix turning**: seed a passes every turn case, seed b still fails on ground. (3) The walking grid swings 19–28/30 between seeds of the same config, so walking needs ≥ 2 seeds (or more replicas) to judge.
+   - *Decision:* run 12's configuration (no turn-in-place) is the stage-1 baseline: a robust slide on both seeds. Turning in place is a separate, secondary weakness (not part of the slide-stop goal).
+
+12. **Ground-only turn-in-place** (run 14, pending, 2 seeds)
+   - *Change:* `turn_in_place_probability` 0.1 with `turn_in_place_min_friction` 0.6: only envs on the ground bin (true μ ≥ 0.6) get pure turn commands. Training mix: ice 1.2% pure turns (run 12: 1.3%), ground 10.7%.
+   - *Hypothesis:* turn practice *on ice* is what destabilized the ice slide in runs 13/13b; ground-only keeps the ice-side training identical to run 12 while targeting 12b's ground turning failures. Does not address turn-in-place on ice.
+   - *Pass:* robustness suite ≥ 8/9 on both seeds; turn-in-place yaw error at μ 0.8/1 clearly below 12/12b (0.11–0.67) on both seeds; walking grid not worse than 12/12b (19–25/30). If the slide still breaks, turning practice conflicts with the slide policy-wide and run 12 stays the baseline.
 
 ## Observations
 
@@ -233,7 +267,7 @@ Each run keeps the same color in every figure. Data: `logs/eval/*.json`.
 Each stage changes one big thing (behavior → physics → structure), so results stay attributable.
 
 1. **Finish controlled sliding** (privileged μ, current stage)
-   - Run 13 (2 seeds): turn-in-place commands. Then optionally μ-dependent `slide_action_scale` (e.g. 0.1 at μ ≤ 0.1, 0.3 at μ = 0.2). Fallback (option b): scripted standing-pose hold only where stable.
+   - Run 14 (2 seeds): ground-only turn-in-place, gated by the robustness suite (≥ 8/9) and the walking grid. If it fails, freeze stage 1 on run 12's configuration.
    - *Done when:* slide brakes at ≥ 0.9 μg and walking stays ~28/30.
    - Extensions from the goal: controlled stop variants (yaw/spin to reorient while sliding). On flat isotropic ice, legs out cannot brake harder than μg.
 

@@ -119,6 +119,9 @@ class Go2LowFric(Go2):
         (runs Nov15_19-11-13_, Nov15_19-31-15_) failed turn-in-place.
         A fraction turn_in_place_probability of resamples become: no
         forward/sideways speed, yaw rate of at least turn_in_place_min_yaw.
+        With turn_in_place_min_friction set, only envs on at least that
+        friction get them (ground-only): turn-in-place on every surface made
+        the ice slide fragile (runs 13, 13b), so ice keeps run 12's mix.
         """
         super()._resample_commands(command_mask)
         # Snapshots of runs before this option lack it; they trained without.
@@ -128,6 +131,11 @@ class Go2LowFric(Go2):
         turn = command_mask & (
             torch.rand(self.num_envs, device=self.device) < probability
         )
+        # Snapshots of runs 13/13b lack the friction limit: turns everywhere.
+        min_friction = getattr(self.cfg.commands, "turn_in_place_min_friction", None)
+        if min_friction is not None:
+            # True mu from the backend, not the (possibly misreported) input.
+            turn &= self._backend.contact_friction >= min_friction
         yaw = self.commands[:, 2]
         minimum = self.cfg.commands.turn_in_place_min_yaw
         # Keep the sampled direction (and size, if already large enough).

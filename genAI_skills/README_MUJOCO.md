@@ -14,7 +14,7 @@ The repository uses [uv](https://docs.astral.sh/uv/) exclusively for Python
 and dependency management. `pyproject.toml` and `uv.lock` are the only package
 and environment sources of truth.
 
-Install uv on Linux or macOS:
+Install uv on Linux or macOS: 
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -428,6 +428,14 @@ rest: slide distance against v^2/(2 mu g), deceleration against mu*g, the
 fraction of the slide with all four feet loaded, touchdowns per second, and
 joint energy per meter. `scripts/play.py --slide V0` plays or records the
 same profile.
+
+`scripts/evaluate_slide_robustness.py` runs the slide evaluation under nine
+scenarios (nominal, randomized robot, random trigger time, entry speeds,
+sideways/turning entry, mid-slide push, sensor noise, a wrong friction
+estimate, and all combined) and grades each against acceptance criteria:
+no falls, mean deceleration >= 0.75 mu*g, distance ratio <= 1.5 and within
+10% of nominal on mu <= 0.2 (push scenarios on falls only). `--regrade`
+re-applies the grading to a saved report without simulating.
 
 The gate measures planar velocity RMSE, yaw-rate RMSE, target/velocity jitter
 above 10 Hz (beyond the first three gait harmonics), target clipping, swing-phase
