@@ -99,7 +99,7 @@ def plot(reports: list[dict], labels: list[str], output: Path) -> None:
             spine.set_visible(False)
         ax.set_ylim(bottom=0)
     handles, names = axes.flat[0].get_legend_handles_labels()
-    fig.legend(handles, names, loc="outside upper right", frameon=False, ncols=6)
+    fig.legend(handles, names, loc="outside lower center", frameon=False, ncols=6)
     fig.suptitle(
         "Go2 policies vs. contact friction (shaded: training friction bins)",
         color=INK,

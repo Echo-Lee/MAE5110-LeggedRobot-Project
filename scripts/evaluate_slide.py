@@ -26,7 +26,7 @@ import subprocess
 import torch
 
 from gym.envs.base.domain_randomization import apply_domain_randomization_override
-from gym.envs.go2.go2_lowfric import slide_speed_profile
+from gym.envs.go2.go2_lowfric import slide_phase_profile, slide_speed_profile
 from gym.utils.helpers import class_to_dict, get_load_path, set_seed
 from gym.utils.locomotion_metrics import (
     GRAVITY_M_S2,
@@ -43,7 +43,7 @@ SETTLE_S = 2.0
 
 
 @torch.no_grad()
-def evaluate(env, runner, cases, *, replicas, runup_s, seconds):
+def evaluate(env, runner, cases, *, replicas, runup_s, hold_s, seconds):
     num_envs = len(cases) * replicas
     frictions = torch.tensor(
         [friction for friction, _ in cases], device=env.device
@@ -69,12 +69,18 @@ def evaluate(env, runner, cases, *, replicas, runup_s, seconds):
         "power_abs",
     )
     records = {key: [] for key in keys}
+    # Policies trained with the slide-phase observation must see it set as
+    # in training; older policies have no such input.
+    observes_phase = "slide_phase" in runner.actor_cfg["obs"]
     for step in range(round(seconds / env.dt)):
-        forward = slide_speed_profile(
-            torch.tensor(step * env.dt, device=env.device), speeds, frictions, runup_s
-        )
+        time_s = torch.tensor(step * env.dt, device=env.device)
+        forward = slide_speed_profile(time_s, speeds, frictions, runup_s)
         env.commands[:] = 0.0
         env.commands[:, 0] = forward
+        if observes_phase:
+            env.slide_phase[:, 0] = slide_phase_profile(
+                time_s, speeds, frictions, runup_s, hold_s
+            ).float()
         actions = runner.get_inference_actions()
         runner.set_actions(runner.actor_cfg["actions"], actions)
         env.step()
@@ -150,6 +156,12 @@ def main():
     parser.add_argument("--frictions", type=float, nargs="+", default=FRICTIONS)
     parser.add_argument("--speeds", type=float, nargs="+", default=RUNUP_SPEEDS)
     parser.add_argument("--runup", type=float, default=4.0)
+    parser.add_argument(
+        "--hold",
+        type=float,
+        default=0.5,
+        help="seconds the slide-phase flag stays on after the stop (as trained)",
+    )
     parser.add_argument("--replicas", type=int, default=8)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -204,6 +216,7 @@ def main():
             cases,
             replicas=args.replicas,
             runup_s=args.runup,
+            hold_s=args.hold,
             seconds=seconds,
         )
     finally:

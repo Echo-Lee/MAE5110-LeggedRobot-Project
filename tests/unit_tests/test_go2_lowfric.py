@@ -61,7 +61,9 @@ def test_actor_observation_includes_friction_and_steps(env):
     runner_cfg = Go2LowFricRunnerCfg()
     actor_obs = env.get_states(runner_cfg.actor.obs)
     assert actor_obs.shape[0] == 8
-    torch.testing.assert_close(actor_obs[:, -1], env._backend.contact_friction)
+    assert runner_cfg.actor.obs[-2:] == ["contact_friction", "slide_phase"]
+    torch.testing.assert_close(actor_obs[:, -2], env._backend.contact_friction)
+    torch.testing.assert_close(actor_obs[:, -1], env.slide_phase[:, 0])
     env.step()
     assert torch.isfinite(env.get_states(runner_cfg.critic.obs)).all()
 
@@ -155,3 +157,115 @@ def test_default_slide_settings():
     assert commands.slide_probability == pytest.approx(0.3)
     assert commands.slide_max_friction == pytest.approx(ICE_FRICTION[1])
     assert commands.slide_runup_time == pytest.approx(4.0)
+
+
+# --- run 8: slide ends after a short hold; slide-phase observation ---------------
+
+
+def test_slide_phase_profile_covers_slide_and_hold_only():
+    from gym.envs.go2.go2_lowfric import slide_phase_profile
+    from gym.utils.locomotion_metrics import GRAVITY_M_S2
+
+    stop = 4.0 + 1.0 / (0.1 * GRAVITY_M_S2)  # v0 = 1 m/s on mu = 0.1
+    t = torch.tensor([0.0, 3.99, 4.0, stop, stop + 0.49, stop + 0.51, 9.0])
+    phase = slide_phase_profile(t, 1.0, 0.1, runup_s=4.0, hold_s=0.5)
+    assert phase.tolist() == [False, False, True, True, True, False, False]
+
+
+def _start_slides(env, friction=0.1, speed=1.0):
+    env.cfg.commands.slide_probability = 1.0
+    env.domain_randomizer._resample_contact_friction = False
+    _set_friction(env, [friction] * 4 + [1.0] * 4)
+    env._reset_idx(torch.ones(8, dtype=torch.bool))
+    env.slide_speed[:] = speed
+
+
+def _step_to(env, seconds):
+    while env.episode_length_buf[0] * env.dt < seconds - 1e-9:
+        env.step()
+
+
+def test_phase_is_off_during_run_up_and_on_during_the_slide(env):
+    _start_slides(env)
+    _step_to(env, 3.0)
+    assert (env.slide_phase == 0).all()
+    _step_to(env, 4.5)  # sliding: v0 = 1 decays at ~0.98 m/s^2 from 4 s
+    assert (env.slide_phase[:4] == 1).all()
+    assert (env.slide_phase[4:] == 0).all()  # ground envs never slide
+    assert env.slide_active[:4].all()
+
+
+def test_slide_ends_after_the_hold_and_random_commands_resume(env):
+    _start_slides(env)
+    _step_to(env, 6.0)  # stop ~5.02 s, hold until ~5.52 s
+    assert not env.slide_active.any()
+    assert (env.slide_phase == 0).all()
+    # Normal sampling resumed: not every former slide env is commanded zero.
+    assert not (env.commands[:4] == 0).all()
+
+
+def test_run_7_snapshots_without_a_hold_keep_holding_zero(env):
+    from types import SimpleNamespace
+
+    settings = env.cfg.commands
+    env.cfg.commands = SimpleNamespace(
+        **{
+            key: getattr(settings, key)
+            for key in (
+                "resampling_time",
+                "slide_probability",
+                "slide_max_friction",
+                "slide_speed_range",
+                "slide_runup_time",
+                "slide_decel_scale",
+            )
+        }
+    )
+    env.cfg.commands.slide_probability = 1.0
+    env.domain_randomizer._resample_contact_friction = False
+    _set_friction(env, [0.1] * 8)
+    env._reset_idx(torch.ones(8, dtype=torch.bool))
+    env.slide_speed[:] = 1.0
+    _step_to(env, 6.5)  # past the stop and any 0.5 s hold
+    assert env.slide_active.all()
+    assert (env.commands == 0).all()
+
+
+def test_slide_still_penalizes_joint_motion_only_in_the_slide_phase():
+    from types import SimpleNamespace
+
+    from gym.envs.go2.go2_lowfric import Go2LowFric
+
+    scale = torch.full((12,), 2.0)
+    state = SimpleNamespace(
+        dof_vel=torch.full((2, 12), 4.0),
+        scales={"dof_vel": scale},
+        slide_phase=torch.tensor([[1.0], [0.0]]),
+    )
+    torch.testing.assert_close(
+        Go2LowFric._reward_slide_still(state), torch.tensor([-4.0, 0.0])
+    )
+    assert Go2LowFricRunnerCfg().critic.reward.weights.slide_still == 0.0
+
+
+def test_play_slide_schedule_sets_the_phase_for_phase_aware_policies():
+    from types import SimpleNamespace
+
+    from scripts.play import command_schedule
+
+    fake = SimpleNamespace(
+        commands=torch.zeros(2, 3),
+        num_envs=2,
+        device="cpu",
+        dt=0.01,
+        _backend=SimpleNamespace(contact_friction=torch.tensor([0.1, 0.1])),
+        slide_phase=torch.zeros(2, 1),
+    )
+    args = SimpleNamespace(
+        task="go2_lowfric", command=None, slide=1.0, slide_runup=4.0, slide_hold=0.5
+    )
+    schedule = command_schedule(fake, args)
+    command, phase = schedule(100)  # 1 s: run-up
+    assert command[:, 0].tolist() == [1.0, 1.0] and phase.tolist() == [0.0, 0.0]
+    command, phase = schedule(450)  # 4.5 s: sliding
+    assert (command[:, 0] < 1.0).all() and phase.tolist() == [1.0, 1.0]

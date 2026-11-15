@@ -24,6 +24,9 @@ class Go2LowFricCfg(Go2Cfg):
         slide_speed_range = [0.8, 1.3]  # v0 (m/s); mu=0.05 tops out ~1.3
         slide_runup_time = 4.0  # s; reaching v0 on mu=0.05 takes ~3 s
         slide_decel_scale = 1.0
+        # Seconds at zero after the slide stops; then the slide ends and the
+        # env gets normal random commands (turning in place included).
+        slide_stop_hold_time = 0.5
 
     class domain_randomization(Go2Cfg.domain_randomization):
         class startup(Go2Cfg.domain_randomization.startup):
@@ -61,10 +64,12 @@ class Go2LowFricRunnerCfg(Go2RunnerCfg):
     class actor(Go2RunnerCfg.actor):
         # Privileged teacher input: true friction. Replace with an estimate
         # for a deployable student policy.
-        obs = Go2RunnerCfg.actor.obs + ["contact_friction"]
+        # slide_phase: 1 during a run-up-and-slide's slide, so the policy
+        # can tell a slide from an ordinary command change.
+        obs = Go2RunnerCfg.actor.obs + ["contact_friction", "slide_phase"]
 
     class critic(Go2RunnerCfg.critic):
-        obs = Go2RunnerCfg.critic.obs + ["contact_friction"]
+        obs = Go2RunnerCfg.critic.obs + ["contact_friction", "slide_phase"]
 
         class reward(Go2RunnerCfg.critic.reward):
             class weights(Go2RunnerCfg.critic.reward.weights):
@@ -84,6 +89,10 @@ class Go2LowFricRunnerCfg(Go2RunnerCfg):
                 # touchdowns). Kept available for later experiments.
                 glide = 0.0
                 ice_touchdowns = 0.0
+                # Joint-velocity penalty during the slide phase only. Off;
+                # enable if the slide-phase observation alone does not make
+                # the policy coast (run Nov15_06-10-02_ stepped through it).
+                slide_still = 0.0
 
     class algorithm(Go2RunnerCfg.algorithm):
         # Initial value: 0.01 (inherited from LeggedRobotRunnerCfg).

@@ -21,6 +21,17 @@ def slide_speed_profile(time_s, speed, friction, runup_s, decel_scale=1.0):
     return (speed - decel * sliding).clamp_min(0.0)
 
 
+def slide_phase_profile(time_s, speed, friction, runup_s, hold_s, decel_scale=1.0):
+    """Slide-phase flag of a run-up-and-slide episode at ``time_s``.
+
+    True from the end of the run-up until ``hold_s`` after the commanded
+    speed reaches zero, matching the observation Go2LowFric trains with.
+    """
+    decel = decel_scale * friction * GRAVITY_M_S2
+    end_s = runup_s + speed / decel + hold_s
+    return (time_s >= runup_s) & (time_s < end_s)
+
+
 class Go2LowFric(Go2):
     """Go2 locomotion across bimodal (ice / ground) contact friction.
     the true per-environment friction is a
@@ -44,6 +55,9 @@ class Go2LowFric(Go2):
             self.num_envs, dtype=torch.bool, device=self.device
         )
         self.slide_speed = torch.zeros(self.num_envs, device=self.device)
+        # Observation: 1 from the start of a slide until its post-stop hold
+        # ends, else 0. On hardware this is part of the command ("slide now").
+        self.slide_phase = torch.zeros(self.num_envs, 1, device=self.device)
 
     def _slide_settings(self):
         """The commands config if it defines slide episodes, else None.
@@ -93,22 +107,49 @@ class Go2LowFric(Go2):
         masked_update(self.slide_speed, speed, reset_mask)
 
     def _apply_slide_commands(self):
-        """Overwrite slide envs' commands with the run-up-and-slide profile."""
+        """Drive slide envs' commands and the slide-phase observation.
+
+        A slide episode holds the run-up speed, decays it at the sliding
+        deceleration, holds zero for slide_stop_hold_time, and then ends:
+        the env gets a normal random command for the rest of the episode.
+        Ending the slide keeps "zero forward command" from meaning "stand
+        still" so often that turning in place is forgotten (run
+        Nov15_06-10-02_ held zero until the episode ended and lost it).
+        """
         settings = self._slide_settings()
         if settings is None:
             return
+        time_s = self.episode_length_buf * self.dt
+        friction = self._backend.contact_friction
+        runup = settings.slide_runup_time
+        # Snapshots of run Nov15_06-10-02_ predate the hold setting; that run
+        # held zero until the episode ended, so replay it that way.
+        hold = getattr(settings, "slide_stop_hold_time", None)
+        if hold is not None:
+            decel = settings.slide_decel_scale * friction * GRAVITY_M_S2
+            end_time = runup + self.slide_speed / decel + hold
+            finished = self.slide_active & (time_s >= end_time)
+            self.slide_active &= ~finished
+            self._resample_commands(finished)
         forward = slide_speed_profile(
-            self.episode_length_buf * self.dt,
-            self.slide_speed,
-            self._backend.contact_friction,
-            settings.slide_runup_time,
-            settings.slide_decel_scale,
+            time_s, self.slide_speed, friction, runup, settings.slide_decel_scale
         )
         profile = torch.zeros_like(self.commands)
         profile[:, 0] = forward
         torch.where(
             self.slide_active.unsqueeze(1), profile, self.commands, out=self.commands
         )
+        self.slide_phase[:, 0] = (self.slide_active & (time_s >= runup)).float()
+
+    def _reward_slide_still(self):
+        """Penalize joint motion during the slide phase (else 0).
+
+        Mean squared joint velocity, normalized by the dof_vel scaling, times
+        the slide-phase flag: rewards holding a posture and coasting instead
+        of stepping through the slide.
+        """
+        normalized = self.dof_vel / self.scales["dof_vel"]
+        return -self.slide_phase[:, 0] * normalized.square().mean(dim=1)
 
     def _ice_gate(self):
         """~1 on low friction, ~0 on high: sigmoid((threshold - mu) / width).

@@ -419,7 +419,10 @@ top-speed panel, for up to six policies.
 
 `go2_lowfric` trains run-up-and-slide episodes on ice (`commands.slide_*`):
 the command holds a forward speed for a run-up, then decays at mu*g, the
-deceleration of a body sliding on all four feet, to a stop.
+deceleration of a body sliding on all four feet, to a stop; after a short
+hold (`slide_stop_hold_time`) the slide ends and normal random commands
+resume. The `slide_phase` observation is 1 from the slide's start until the
+hold ends, so the policy can tell a slide from an ordinary command change.
 `scripts/evaluate_slide.py` measures how a policy follows that profile from
 rest: slide distance against v^2/(2 mu g), deceleration against mu*g, the
 fraction of the slide with all four feet loaded, touchdowns per second, and

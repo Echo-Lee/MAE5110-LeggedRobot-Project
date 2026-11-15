@@ -119,6 +119,12 @@ def get_play_args(argv=None):
         help="run-up time before the slide starts (s); go2_lowfric trains with 4",
     )
     parser.add_argument(
+        "--slide_hold",
+        type=float,
+        default=0.5,
+        help="seconds the slide-phase observation stays on after the stop",
+    )
+    parser.add_argument(
         "--video",
         type=str,
         default=None,
@@ -236,10 +242,12 @@ def setup(args):
     return env, runner
 
 
-def policy_step(env, runner, command):
+def policy_step(env, runner, command, slide_phase=None):
     if command is not None:
         # Re-pin every step: the task's own command sampler may fire.
         env.commands[:] = command
+    if slide_phase is not None:
+        env.slide_phase[:, 0] = slide_phase
     runner.set_actions(
         runner.actor_cfg["actions"],
         runner.get_inference_actions(),
@@ -249,27 +257,33 @@ def policy_step(env, runner, command):
 
 
 def command_schedule(env, args):
-    """Return step -> command tensor (or None to leave commands alone)."""
+    """Return step -> (command, slide phase); None leaves either alone."""
     if args.command is None and args.slide is None:
-        return lambda step: None
+        return lambda step: (None, None)
     if not hasattr(env, "commands"):
         raise SystemExit(f"task {args.task} has no velocity commands")
     if args.command is not None:
         held = torch.tensor(args.command, device=env.device)
-        return lambda step: held
-    from gym.envs.go2.go2_lowfric import slide_speed_profile
+        return lambda step: (held, None)
+    from gym.envs.go2.go2_lowfric import slide_phase_profile, slide_speed_profile
 
     friction = env._backend.contact_friction
+    # Policies trained with the slide-phase observation see it set as in
+    # training; older policies have no such input.
+    observes_phase = hasattr(env, "slide_phase")
 
     def slide(step):
+        time_s = torch.tensor(step * env.dt, device=env.device)
         command = torch.zeros(env.num_envs, 3, device=env.device)
         command[:, 0] = slide_speed_profile(
-            torch.tensor(step * env.dt, device=env.device),
-            args.slide,
-            friction,
-            args.slide_runup,
+            time_s, args.slide, friction, args.slide_runup
         )
-        return command
+        phase = None
+        if observes_phase:
+            phase = slide_phase_profile(
+                time_s, args.slide, friction, args.slide_runup, args.slide_hold
+            ).float()
+        return command, phase
 
     return slide
 
@@ -277,7 +291,7 @@ def command_schedule(env, args):
 def play(env, runner, command_at):
     n_steps = 10 * int(env.max_episode_length)
     for step in range(n_steps):
-        policy_step(env, runner, command_at(step))
+        policy_step(env, runner, *command_at(step))
         env.check_exit()
 
 
@@ -288,7 +302,7 @@ def record(env, runner, args, command_at):
     recorder = VideoRecorder(env, args.video, overlay=args.overlay)
     try:
         for step in range(round(args.video_seconds / env.dt)):
-            policy_step(env, runner, command_at(step))
+            policy_step(env, runner, *command_at(step))
             recorder.capture(step)
     finally:
         recorder.close()
