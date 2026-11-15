@@ -210,6 +210,10 @@ def cot_at_speed(
 SLIDE_STOP_SPEED = 0.1
 # Control steps before the slide starts that are averaged for its entry speed.
 SLIDE_ENTRY_WINDOW = 20
+# A replica entering the slide slower than this never really ran up; its
+# distance and deceleration ratios would divide by ~0, so it is counted in
+# no_runup_rate instead.
+SLIDE_MIN_ENTRY_SPEED = 0.2
 # A foot must be unloaded at least this long before landing again to count
 # as a step; shorter gaps are contact chatter (a loaded foot bouncing).
 STEP_MIN_AIR_TIME_S = 0.05
@@ -265,7 +269,9 @@ def summarize_slide(
 
     ``touchdowns_per_s`` counts only landings after at least ``min_air_time``
     in the air (real steps); ``contact_breaks_per_s`` counts every reloading,
-    including chatter of feet that stay down.
+    including chatter of feet that stay down. Replicas entering slower than
+    SLIDE_MIN_ENTRY_SPEED did not run up: they count in ``no_runup_rate``
+    and are left out of the slide metrics.
     """
     alive = trace["alive"].bool()
     survived = alive[-1]
@@ -275,6 +281,7 @@ def summarize_slide(
         "fall_rate": 1.0 - survived.float().mean().item(),
     }
     keys = (
+        "no_runup_rate",
         "stopped_rate",
         "entry_speed_m_s",
         "slide_distance_m",
@@ -304,6 +311,10 @@ def summarize_slide(
         start = starts[r]
         speed = trace["speed"][:, r]
         entry = speed[max(0, start - SLIDE_ENTRY_WINDOW) : start].mean().item()
+        if entry < SLIDE_MIN_ENTRY_SPEED:
+            per_replica["no_runup_rate"].append(1.0)
+            continue
+        per_replica["no_runup_rate"].append(0.0)
         below = torch.nonzero(speed[start:] < stop_speed).flatten()
         stopped = below.numel() > 0
         stop = start + (below[0].item() if stopped else speed.shape[0] - 1 - start)

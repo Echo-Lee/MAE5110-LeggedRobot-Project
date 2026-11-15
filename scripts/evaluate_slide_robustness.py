@@ -66,7 +66,7 @@ SCENARIOS = {
     "messy_entry": dict(perturb=SlidePerturbations(entry_lateral=0.3, entry_yaw=0.5)),
     "push": dict(
         perturb=SlidePerturbations(push_speed=0.5, push_delay=0.3),
-        graded_on=("falls",),
+        graded_on=("falls", "no run-up"),
     ),
     "sensor_noise": dict(perturb=SlidePerturbations(noise=SENSOR_NOISE)),
     "friction_error": dict(perturb=SlidePerturbations(friction_error=0.3)),
@@ -78,10 +78,10 @@ SCENARIOS = {
             push_speed=0.5,
             push_delay=0.3,
         ),
-        graded_on=("falls",),
+        graded_on=("falls", "no run-up"),
     ),
 }
-ALL_CHECKS = ("falls", "decel", "distance", "worse than nominal")
+ALL_CHECKS = ("falls", "no run-up", "decel", "distance", "worse than nominal")
 
 
 def by_friction(results):
@@ -96,6 +96,7 @@ def by_friction(results):
 
         summary[friction] = {
             "fall_rate": max(r["fall_rate"] for r in cases),
+            "no_runup_rate": max(r.get("no_runup_rate") or 0.0 for r in cases),
             "decel_ratio": mean("decel_ratio"),
             "distance_ratio": mean("distance_ratio"),
             "all_feet_loaded_fraction": mean("all_feet_loaded_fraction"),
@@ -113,6 +114,9 @@ def grade(summary, nominal_decel=None, graded_on=ALL_CHECKS):
     failures = []
     if max(s["fall_rate"] for s in trained.values()) > CRITERIA["max_fall_rate"]:
         failures.append("falls")
+    # Not running up before a commanded slide is a failure of the maneuver.
+    if max(s.get("no_runup_rate", 0.0) for s in trained.values()) > 0:
+        failures.append("no run-up")
     decels = [s["decel_ratio"] for s in trained.values() if s["decel_ratio"]]
     distances = [s["distance_ratio"] for s in trained.values() if s["distance_ratio"]]
     decel = statistics.mean(decels) if decels else None

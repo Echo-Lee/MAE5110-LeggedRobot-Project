@@ -1,7 +1,9 @@
 # Changes: low-friction Go2 work
 
 Local review file (gitignored). Baseline: commit `6283dc9`. Branch: `ti237CU/dev`.
-Everything below is committed as of `03666c4`, except the **run 8** changes marked *(uncommitted)*.
+Latest commit: `3ace272` (run 14 config). Rows marked *(uncommitted)* are on disk only; *(local)* = untracked outputs in `logs/`.
+
+> **Note:** `3ace272` trains **run 14** (ground-only turn-in-place, rejected). The uncommitted revert restores the frozen **stage-1 baseline (run 12)** config; commit it so the branch reproduces run 12.
 
 | Commit | Summary |
 |---|---|
@@ -19,8 +21,11 @@ Everything below is committed as of `03666c4`, except the **run 8** changes mark
 | `2885576` | Run 12: residual hold (`commands.slide_action_scale` 0.2, `Go2LowFric._apply_slide_action_scale` in `_pre_decimation_step`); `slide_pose` back to 3 |
 | `a742102` | `scripts/train.py` saves `seed.json` (seed + whether from `--seed` or random) in each run folder; test `tests/unit_tests/test_train_seed.py` |
 | `a742102` | Run 13: `commands.turn_in_place_probability` 0.1 + `turn_in_place_min_yaw` 0.5 (`Go2LowFric._resample_commands`); 4 tests |
-| *(uncommitted)* | Run 14: turn-in-place ground-only: `turn_in_place_probability` 0.1 with new `turn_in_place_min_friction` 0.6 (true μ); runs 13/13b replay with turns everywhere; 3 tests |
-| *(uncommitted)* | Robustness suite: `scripts/evaluate_slide_robustness.py` (9 scenarios, grading, `--regrade`); `scripts/evaluate_slide.py` refactored (`make_slide_env`, `SlidePerturbations`, `trial_seconds`); per-replica slide start in `summarize_slide`; tests `test_slide_robustness.py` |
+| `3ace272` | Run 14: `turn_in_place_min_friction` 0.6 (ground-only turns, true μ); robustness suite `scripts/evaluate_slide_robustness.py` (9 scenarios, grading, `--regrade`); `scripts/evaluate_slide.py` refactored (`make_slide_env`, `SlidePerturbations`, `trial_seconds`); per-replica slide start in `summarize_slide`; tests `test_slide_robustness.py` |
+| *(uncommitted)* | **Revert to run 12 config**: `turn_in_place_probability` 0.1 → 0 (option and code kept; runs 13, 13b, 14 all broke the slide) |
+| *(uncommitted)* | Slide metric: `no_runup_rate` (entries < 0.2 m/s excluded from ratios); suite grades "no run-up" as a failure (push scenarios: falls + no run-up) |
+| *(uncommitted)* | Notebook: run 14 result, Stage 1 result section, figures 6–7, estimator plan |
+| *(local)* | Stage 1 frozen on run 12 (`Nov15_19-11-13_`): videos `logs/videos/stage1/`, figures `fig6_slide_progression.png`, `fig7_robustness_run12.png`; `robustness_run12.json` re-graded |
 
 Run tests (`env -u PYTHONPATH` keeps the ROS Python path out of the venv):
 
@@ -33,7 +38,7 @@ env -u PYTHONPATH uv run --frozen python -m pytest gym learning -q
 
 | File | Commits | What it does |
 |---|---|---|
-| `gym/envs/go2/go2_lowfric.py` | `d775cd0`, `78b0fd5`, `1facc95`, `03666c4` | `Go2LowFric` task. `contact_friction` observation (true μ, privileged). Foot contact timer and touchdown flags. `_reward_glide` (v2: slide × load share × persistence) and `_reward_ice_touchdowns`. Run-up-and-slide episodes: `slide_speed_profile()`, `_sample_slide_episodes()`, `_apply_slide_commands()`. *(uncommitted)* slide ends after `slide_stop_hold_time` and random commands resume; `slide_phase` observation + `slide_phase_profile()`; `_reward_slide_still` (joint velocity penalty, slide phase only). |
+| `gym/envs/go2/go2_lowfric.py` | `d775cd0`, `78b0fd5`, `1facc95`, `03666c4` | `Go2LowFric` task. `contact_friction` observation (true μ, privileged). Foot contact timer and touchdown flags. `_reward_glide` (v2: slide × load share × persistence) and `_reward_ice_touchdowns`. Run-up-and-slide episodes: `slide_speed_profile()`, `_sample_slide_episodes()`, `_apply_slide_commands()`; slide ends after `slide_stop_hold_time` and random commands resume; `slide_phase` observation + `slide_phase_profile()`; `_reward_slide_still`, `_reward_slide_pose`; residual hold `_apply_slide_action_scale()`; turn-in-place sampling in `_resample_commands()` (off). |
 | `gym/envs/go2/go2_lowfric_config.py` | all except `a06c68b` | Friction bins ice [0.05, 0.2] / ground [0.6, 1.2] redrawn each episode; 10 s episodes; μ in actor and critic inputs; `entropy_coef` 0.002 (was 0.01); `power` 1e-3, `torques` 1.5e-3 (was 5e-6); `glide` and `ice_touchdowns` **0** (trained values 1.0 / 0.5 in comments); glide settings; `commands.slide_*` (30% of ice episodes, v0 0.8–1.3 m/s, 4 s run-up, decay at μg). *(uncommitted)* `slide_stop_hold_time` 0.5 s; `slide_phase` in actor and critic inputs; `slide_still` weight 0. |
 | `gym/envs/__init__.py` | `d775cd0` | Registers task `go2_lowfric`. |
 | `gym/envs/base/domain_randomization.py` | `d775cd0` | Friction bins + weights, per-episode friction resampling (no GPU sync), bin validation. Off by default for other tasks. |

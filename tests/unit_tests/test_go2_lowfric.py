@@ -380,7 +380,8 @@ def test_turn_in_place_fraction_matches_the_setting():
     cfg.env.num_envs = 2000
     cfg.seed = 5
     cfg.commands.slide_probability = 0.0
-    assert cfg.commands.turn_in_place_probability == pytest.approx(0.1)
+    assert cfg.commands.turn_in_place_probability == 0.0  # off by default
+    cfg.commands.turn_in_place_probability = 0.1
     cfg.commands.turn_in_place_min_friction = None  # every surface here
     task_registry.convert_frequencies_to_params(cfg, Go2LowFricRunnerCfg())
     task = Go2LowFric(cfg, "cpu", True, select_backend(cfg, "cpu", "mujoco"))

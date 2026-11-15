@@ -323,3 +323,13 @@ def test_slides_may_start_at_a_different_step_per_replica():
     result = summarize_slide(trace, dt=DT, slide_start_step=[30, 70], friction=0.1)
     assert result["distance_ratio"] == pytest.approx(1.0, abs=0.05)
     assert result["entry_speed_m_s"] == pytest.approx(1.2)
+
+
+def test_replicas_that_never_ran_up_are_flagged_not_divided_by_zero():
+    trace = _slide_trace(replicas=2)
+    trace["speed"][:, 1] = 0.01  # replica 1 stood still through the run-up
+    trace["forward_speed"][:, 1] = 0.01
+    trace["position"][:, 1] = 0.0
+    result = _slide(trace)
+    assert result["no_runup_rate"] == 0.5
+    assert result["distance_ratio"] == pytest.approx(1.0, abs=0.05)  # replica 0

@@ -40,7 +40,7 @@ Engineering notebook to record the process of training, assumptions, edits, and 
 | 12b | `Nov15_19-31-15_` | Run 12 repeated (different random seed) | Slide reproduces (decel 0.80 vs 0.78 μg mean, no falls). Walking: 19/30 (run 12: 25); turn-in-place fails in both seeds; top speed on ice 1.72 vs 1.06 m/s. |
 | 13 | `Nov15_20-06-14_` (seed 7263, random) | Run 12 + 10% pure turn-in-place commands | **Turning fixed**: 28/30, turn-in-place 0.11–0.28 rad/s, all turn cases pass; CoT at 1 m/s 0.74–1.24 (best yet). Slide good on μ ≤ 0.1 (like run 12) but **worse at μ ≥ 0.15**: decel 0.38–0.41 μg and 50% falls at μ = 0.2, v0 = 1.2. One seed only. |
 | 13b | `Nov15_20-55-40_` (seed 4939, random) | Run 13 repeated | Robustness suite 0/9 (falls at μ = 0.15–0.2 up to 75%); walking 19/30, turn-in-place fails on ground (0.54–0.58 rad/s). Confirms run 13's config makes the slide fragile and does not reliably fix turning. |
-| 14 | pending (2 seeds) | Run 12 + 10% turn-in-place on ground only (μ ≥ 0.6) | Ice keeps run 12's mix (pure turns 1.2%); ground 10.7%. Pass: robustness ≥ 8/9 on both seeds, ground turn-in-place fixed, walking grid not worse than 12/12b. |
+| 14 | `Nov15_21-43-55_` (seed 8241, random) | Run 12 + 10% turn-in-place on ground only | **Failed**: robustness 0/9 (falls up to 75%), often no run-up on ice; walking 14/30, fails ordinary walking at μ 0.1–0.2 and doesn't turn on ice (≈1 rad/s error); ground turning 0.30–0.32. Reverted: `turn_in_place_probability` = 0. |
 
 ### Result figures
 
@@ -53,6 +53,8 @@ Each run keeps the same color in every figure. Data: `logs/eval/*.json`.
 | [fig3](logs/eval/figures/fig3_cot_matched_speed.png) | Matched-speed CoT vs μ and top speed per μ |
 | [fig4](logs/eval/figures/fig4_rollout_timeline_power.png) | Run 4, one full training-style episode on ice and on ground |
 | [fig5](logs/eval/figures/fig5_training_curves.png) | Training curves: action noise, power penalty, glide reward |
+| [fig6](logs/eval/figures/fig6_slide_progression.png) | Commanded slide-stop across training stages (runs 4, 7, 9, 12) |
+| [fig7](logs/eval/figures/fig7_robustness_run12.png) | Run 12 slide robustness: braking per scenario × friction |
 
 ![Friction grid, runs 0-6](logs/eval/figures/fig1_friction_all_runs.png)
 *Fig. 1. Run 4 (+power, yellow) has the lowest tracking error, slip and CoT at almost every μ; glide v1 (pink) shows the scuffing exploit (slip and touchdowns spike on ice).*
@@ -246,10 +248,14 @@ Each run keeps the same color in every figure. Data: `logs/eval/*.json`.
    - *Conclusions:* (1) **Turn-in-place commands make the slide fragile** on both seeds (0/9 vs 8/9), so it is the config, not the seed. (2) They **do not reliably fix turning**: seed a passes every turn case, seed b still fails on ground. (3) The walking grid swings 19–28/30 between seeds of the same config, so walking needs ≥ 2 seeds (or more replicas) to judge.
    - *Decision:* run 12's configuration (no turn-in-place) is the stage-1 baseline: a robust slide on both seeds. Turning in place is a separate, secondary weakness (not part of the slide-stop goal).
 
-12. **Ground-only turn-in-place** (run 14, pending, 2 seeds)
+12. **Ground-only turn-in-place** (run 14, `Nov15_21-43-55_`, seed 8241)
    - *Change:* `turn_in_place_probability` 0.1 with `turn_in_place_min_friction` 0.6: only envs on the ground bin (true μ ≥ 0.6) get pure turn commands. Training mix: ice 1.2% pure turns (run 12: 1.3%), ground 10.7%.
    - *Hypothesis:* turn practice *on ice* is what destabilized the ice slide in runs 13/13b; ground-only keeps the ice-side training identical to run 12 while targeting 12b's ground turning failures. Does not address turn-in-place on ice.
    - *Pass:* robustness suite ≥ 8/9 on both seeds; turn-in-place yaw error at μ 0.8/1 clearly below 12/12b (0.11–0.67) on both seeds; walking grid not worse than 12/12b (19–25/30). If the slide still breaks, turning practice conflicts with the slide policy-wide and run 12 stays the baseline.
+   - *Metric fix:* some slide distance ratios came out absurd (3,000–145,000): replicas that never ran up (entry speed ≈ 0) divided by a predicted distance ≈ 0. `summarize_slide` now counts entries below 0.2 m/s as `no_runup_rate` (excluded from the ratios) and the suite grades "no run-up" as a failure. Runs 12–13b had no such cases.
+   - *Result (one seed):* robustness 0/9 (falls up to 75% at μ ≤ 0.2; no run-up at all for sideways/turning entries at μ ≥ 0.1). Walking 14/30: fails forward and sideways walking at μ 0.1–0.2 and does not turn on ice (yaw error ≈ 1.0 rad/s, i.e. stands still); ground turning 0.30–0.32 (better than 12, not than 13). Top speed 1.21 / 2.74 m/s at μ = 0.05 / 1.
+   - *Conclusion:* worse than both run-12 seeds on every robustness and walking measure except ground top speed. Three runs of turn-in-place (13, 13b, 14) all broke the slide, so a second seed of run 14 is not worth it. Turn-in-place practice and the robust slide conflict in this setup.
+   - *Decision:* `turn_in_place_probability` back to 0 (the `turn_in_place_min_friction` option stays). **Stage 1 baseline = run 12's configuration**; turning in place stays a known limitation.
 
 ## Observations
 
@@ -262,12 +268,47 @@ Each run keeps the same color in every figure. Data: `logs/eval/*.json`.
 - **Survival:** 98–99.6% across full training-style episodes for the best policy (Fig. 4).
 - **Averages hide gait problems:** the per-foot load and touchdown checks and the videos found every lopsided gait.
 
+## Stage 1 result (frozen)
+
+**Final checkpoint:** run 12, `logs/go2_lowfric/Nov15_19-11-13_/model_1500.pt` (config committed in `2885576`: power penalty, entropy 0.002, ice/ground friction bins, run-up-and-slide episodes with slide-phase flag, `slide_pose` 3, residual hold `slide_action_scale` 0.2, no turn-in-place). Chosen over run 12b (same config, other seed) for its walking and its slide video.
+
+**What it does:** one policy, two modes. Normal walking/running on any friction (trot-like, all four legs, ≈0.8–1.3 CoT at 1 m/s); and, when the slide-phase flag is set on ice, a slide-stop: feet planted near the standing pose, small balance corrections only, stopping by friction.
+
+| Measure | Run 12 | Baseline before slide work (run 4) |
+|---|---|---|
+| Slide braking (μ 0.05–0.2, mean) | 0.78 μg (0.73–0.86) | 0.55 μg (walks to a stop) |
+| Stopping distance ÷ ideal | 1.35 | 2.0–2.3 |
+| All 4 feet down during slide | 47–65% | 0% |
+| Real steps during slide | 1.2–4 /s | ~33 /s |
+| Slide robustness suite | 8/9 (no falls except 1/8 in *combined* at μ 0.1) | – |
+| Walking grid | 25/30 | 29/30 |
+| Matched-speed CoT at 1 m/s | 0.82–1.32 | 1.08–1.29 |
+
+![Slide progression](logs/eval/figures/fig6_slide_progression.png)
+*Fig. 6. Braking, stopping distance and feet-down time across the stages of slide training. Walking policy (yellow) brakes at ~0.55 μg by stepping; slide episodes alone (pink) were worse; the standing-pose reward (green) and the residual hold (blue, final) bring braking to ~0.75–0.86 μg with stopping distance ~1.35× ideal at every μ.*
+
+![Run 12 robustness](logs/eval/figures/fig7_robustness_run12.png)
+*Fig. 7. Run 12 under 9 scenarios: braking stays 0.73–0.98 μg except with a push (0.60–0.69, no falls) and the combined worst case (0.54–0.64, one fall in 8 at μ 0.1). μ 0.3 was never trained for slides: braking 0.29–0.68, no falls.*
+
+**Videos** (`logs/videos/stage1/`): `run12_slide_mu0.05_v1.2`, `run12_slide_mu0.1_v1.2` (preferred), `run12_slide_mu0.2_v1.2`, `run12_slide_mu0.1_v0.8`, `run12_walk_ice_mu0.05_fwd1`, `run12_walk_ground_mu1_fwd1`, `run12_turn_ground_mu1`.
+
+**Known limitations**
+- Braking ≈ 0.78 μg, not μg: a rigid standing pose reaches μg on μ ≤ 0.1 but tips over at μ 0.2; the learned slide trades braking for balance.
+- Turning in place is weak (0.5–0.7 rad/s error on some surfaces). Three attempts to train it (runs 13, 13b, 14) broke the slide.
+- Walking quality varies a lot between seeds (run 12b: 19/30); the slide does not (12b: 8/9, no falls).
+- Slide is commanded (slide-phase flag) and uses the true μ: a deployable version needs a μ estimate (Roadmap).
+- Flat ground, isotropic friction, slide trained only for μ ≤ 0.2.
+
+**Reproduce:** `scripts/evaluate_slide.py`, `scripts/evaluate_slide_robustness.py`, `scripts/evaluate_go2_friction.py`, `scripts/evaluate_cot_vs_friction.py` with `--task go2_lowfric --load_run Nov15_19-11-13_ --original_cfg`; videos with `scripts/play.py ... --friction MU --slide V0 --video PATH`.
+
+**Repository state:** commit `3ace272` holds run 14's (rejected) config. The pending commit sets `turn_in_place_probability` back to 0, which restores run 12's training behavior exactly (the turn-in-place step returns before drawing any random numbers when off), plus the no-run-up metric. Evaluations of run 12 use `--original_cfg`, so they are unaffected either way.
+
 ## Roadmap
 
 Each stage changes one big thing (behavior → physics → structure), so results stay attributable.
 
-1. **Finish controlled sliding** (privileged μ, current stage)
-   - Run 14 (2 seeds): ground-only turn-in-place, gated by the robustness suite (≥ 8/9) and the walking grid. If it fails, freeze stage 1 on run 12's configuration.
+1. **Finish controlled sliding** (privileged μ) — **done, frozen on run 12** (see Stage 1 result)
+   - Turn-in-place experiments closed (runs 13, 13b, 14 all broke the slide). Stage 1 baseline: run 12's configuration (runs 12 / 12b). Next: freeze stage 1 (final checkpoint choice, videos, figures, summary).
    - *Done when:* slide brakes at ≥ 0.9 μg and walking stays ~28/30.
    - Extensions from the goal: controlled stop variants (yaw/spin to reorient while sliding). On flat isotropic ice, legs out cannot brake harder than μg.
 
@@ -288,10 +329,13 @@ Each stage changes one big thing (behavior → physics → structure), so result
      - unstable results across runs/seeds.
    - Compare against the stage 3 baseline on the same evaluations.
 
-**Deployable version (μ estimation)**, independent of stages 2–4:
-- Replace privileged μ with an estimate from proprioceptive history (student policy / state estimator); the actor also gets no linear velocity yet.
-- Train with friction patches (μ changes mid-episode) so the switch is learned and testable.
-- For real hardware, do this right after stage 1; if skating stays a simulation study, it can wait until after stage 4.
+**Deployable version (μ estimation)**, independent of stages 2–4. For real hardware, do this right after stage 1; if skating stays a simulation study, it can wait until after stage 4.
+- *Approach:* an explicit **neural-network state estimator** trained by supervised learning in simulation: input = a short history (~0.5 s) of what a real Go2 measures (joint positions/velocities, previous joint targets, IMU angular velocity and gravity direction, commands, slide flag); output = μ̂ (and base velocity v̂, which the actor also lacks); label = the true μ (and v) from the simulator. The run-12 policy then reads μ̂ instead of μ.
+- *Existing code:* `learning/algorithms/SE.py` (`StateEstimator`: MSE regression, rollout storage, export) and `learning/modules/state_estimator.py` (MLP) exist but are not wired into any runner yet; history inputs are new.
+- *Steps:* (1) record (history, μ, v) data with the frozen run-12 policy on randomized μ and train the estimator offline; check μ̂ accuracy by friction and how fast it settles; (2) run the policy on μ̂ through the existing evaluations (`--misreport_friction` already showed ±30% μ error is tolerated); (3) if the policy needs it, fine-tune or train jointly (estimator updated alongside PPO, policy sees μ̂ during training).
+- *Observability limit:* μ only shows when feet slip. On grippy ground the estimator can only say "μ is high enough", which is fine because the policy barely depends on μ there (Fig. 2).
+- *Friction patches:* train and test with μ changing mid-episode (ice → carpet → ice) so the estimate, and the gait, switch on contact with a new surface.
+- *Alternatives (not chosen first):* teacher–student distillation of the whole policy (RMA-style latent instead of μ̂), or a recurrent policy with no explicit estimate. The explicit μ̂ keeps run 12 unchanged and is easy to inspect.
 
 **Other open items**
 - Continuous log-uniform μ instead of two bins; friction-aware commands on ice.

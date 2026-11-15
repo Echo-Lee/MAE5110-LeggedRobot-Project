@@ -86,5 +86,11 @@ def test_push_scenarios_are_graded_on_falls_only():
     assert grade_fn(pushed, graded_on=("falls",))["passed"]
     fallen = by_friction([_case(0.1, 0.8, fall=0.25, decel=0.5, distance=2.0)])
     assert grade_fn(fallen, graded_on=("falls",))["failures"] == ["falls"]
-    assert SCENARIOS["push"]["graded_on"] == ("falls",)
-    assert SCENARIOS["combined"]["graded_on"] == ("falls",)
+    assert SCENARIOS["push"]["graded_on"] == ("falls", "no run-up")
+    assert SCENARIOS["combined"]["graded_on"] == ("falls", "no run-up")
+
+
+def test_no_run_up_fails_the_scenario():
+    stuck = _case(0.1, 0.8)
+    stuck["no_runup_rate"] = 0.25
+    assert "no run-up" in grade(by_friction([stuck]))["failures"]
