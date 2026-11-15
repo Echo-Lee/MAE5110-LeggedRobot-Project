@@ -210,6 +210,27 @@ def cot_at_speed(
 SLIDE_STOP_SPEED = 0.1
 # Control steps before the slide starts that are averaged for its entry speed.
 SLIDE_ENTRY_WINDOW = 20
+# A foot must be unloaded at least this long before landing again to count
+# as a step; shorter gaps are contact chatter (a loaded foot bouncing).
+STEP_MIN_AIR_TIME_S = 0.05
+
+
+def count_steps(loaded: torch.Tensor, min_air_steps: int) -> int:
+    """Landings of one foot after at least ``min_air_steps`` unloaded steps.
+
+    ``loaded`` is a 1-D bool sequence. Contact chatter (brief unloading of
+    a foot that stays down) is not counted.
+    """
+    steps = 0
+    air = 0
+    for is_loaded in loaded.tolist():
+        if is_loaded:
+            if air >= min_air_steps and air > 0:
+                steps += 1
+            air = 0
+        else:
+            air += 1
+    return steps
 
 
 def summarize_slide(
@@ -220,6 +241,7 @@ def summarize_slide(
     friction: float,
     stop_speed: float = SLIDE_STOP_SPEED,
     load_threshold: float = FOOT_LOAD_THRESHOLD_N,
+    min_air_time: float = STEP_MIN_AIR_TIME_S,
 ) -> dict:
     """Summarize run-up-and-slide trials on one friction coefficient.
 
@@ -237,6 +259,10 @@ def summarize_slide(
     achieves; so a coasting slide has distance_ratio and decel_ratio near 1,
     all four feet loaded, few touchdowns, and little joint energy, while
     stepping to slow down shows touchdowns, energy, and a longer distance.
+
+    ``touchdowns_per_s`` counts only landings after at least ``min_air_time``
+    in the air (real steps); ``contact_breaks_per_s`` counts every reloading,
+    including chatter of feet that stay down.
     """
     alive = trace["alive"].bool()
     survived = alive[-1]
@@ -256,6 +282,7 @@ def summarize_slide(
         "all_feet_loaded_fraction",
         "min_foot_loaded_fraction",
         "touchdowns_per_s",
+        "contact_breaks_per_s",
         "slide_energy_j",
         "slide_energy_per_m_j",
         "slide_tracking_rmse_m_s",
@@ -278,7 +305,11 @@ def summarize_slide(
         distance = (trace["position"][stop, r] - trace["position"][start, r]).norm()
         predicted = entry**2 / (2 * friction * GRAVITY_M_S2)
         feet = loaded[window, r]
-        touchdowns = (feet[1:] & ~feet[:-1]).sum().item()
+        min_air_steps = max(1, round(min_air_time / dt))
+        touchdowns = sum(
+            count_steps(feet[:, f], min_air_steps) for f in range(feet.shape[1])
+        )
+        contact_breaks = (feet[1:] & ~feet[:-1]).sum().item()
         energy = trace["power_abs"][window, r].sum().item() * dt
         error = trace["forward_speed"][window, r] - trace["command"][window, r]
         values = {
@@ -293,6 +324,7 @@ def summarize_slide(
             # The least-used foot: ~0 when a leg is held up through the slide.
             "min_foot_loaded_fraction": feet.float().mean(dim=0).min().item(),
             "touchdowns_per_s": touchdowns / duration,
+            "contact_breaks_per_s": contact_breaks / duration,
             "slide_energy_j": energy,
             "slide_energy_per_m_j": energy / max(distance.item(), 1e-6),
             "slide_tracking_rmse_m_s": error.square().mean().sqrt().item(),

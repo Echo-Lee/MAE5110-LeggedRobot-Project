@@ -89,10 +89,12 @@ class Go2LowFricRunnerCfg(Go2RunnerCfg):
                 # touchdowns). Kept available for later experiments.
                 glide = 0.0
                 ice_touchdowns = 0.0
-                # Joint-velocity penalty during the slide phase only. Off;
-                # enable if the slide-phase observation alone does not make
-                # the policy coast (run Nov15_06-10-02_ stepped through it).
-                slide_still = 0.0
+                # Joint-velocity penalty during the slide phase only (run 10).
+                # Initial value 0.0 (runs 7-9). Run Nov15_07-35-27_ still moves
+                # its joints ~1.2 rad/s while sliding and brakes at only
+                # 0.66-0.85 mu*g; it scores -0.183 per step unweighted, so
+                # ~-0.55 at this weight, against ~3.8 for tracking_lin_vel.
+                slide_still = 3.0
                 # Standing-pose hold during the slide phase only. Run
                 # Nov15_06-56-01_ scores ~0.19 rad^2 in its slides (legs
                 # splayed, rear-left leg up), so ~-0.56 per step at this

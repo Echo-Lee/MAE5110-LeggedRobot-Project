@@ -292,3 +292,23 @@ def test_tucked_leg_and_pose_deviation_are_reported():
     # Without the optional trace the pose metric is simply absent.
     assert _slide(_slide_trace())["pose_rmse_rad"] is None
     assert _slide(_slide_trace())["min_foot_loaded_fraction"] == 1.0
+
+
+def test_count_steps_ignores_contact_chatter():
+    from gym.utils.locomotion_metrics import count_steps
+
+    on, off = True, False
+    chatter = torch.tensor([on, off, on, on, off, on, on, off, off, on])
+    step = torch.tensor([on] * 3 + [off] * 6 + [on] * 3)
+    assert count_steps(chatter, min_air_steps=5) == 0
+    assert count_steps(step, min_air_steps=5) == 1
+    assert count_steps(chatter, min_air_steps=1) == 3  # every reloading
+
+
+def test_slide_separates_steps_from_chatter():
+    trace = _slide_trace()
+    # Foot 1 loses load for one step every 4 steps: planted, but bouncing.
+    trace["foot_load"][::4, :, 1] = 0.0
+    result = _slide(trace)
+    assert result["touchdowns_per_s"] == 0.0
+    assert result["contact_breaks_per_s"] > 20.0

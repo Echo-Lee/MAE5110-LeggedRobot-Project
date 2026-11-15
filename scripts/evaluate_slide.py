@@ -125,7 +125,7 @@ def markdown_table(results) -> str:
 
     lines = [
         "| μ | v0 cmd | fell | stopped | entry v | distance (pred.) | dist ratio "
-        "| decel ratio | all 4 feet | least-used foot | touchdowns/s "
+        "| decel ratio | all 4 feet | least-used foot | steps/s (chatter/s) "
         "| energy (J/m) | pose dev (rad) |",
         "|---" * 13 + "|",
     ]
@@ -142,6 +142,7 @@ def markdown_table(results) -> str:
             f"| {fmt(r['all_feet_loaded_fraction'], '.0%')} "
             f"| {fmt(r['min_foot_loaded_fraction'], '.0%')} "
             f"| {fmt(r['touchdowns_per_s'], '.1f')} "
+            f"({fmt(r['contact_breaks_per_s'], '.0f')}) "
             f"| {fmt(r['slide_energy_per_m_j'], '.0f')} "
             f"| {fmt(r['pose_rmse_rad'], '.2f')} |"
         )

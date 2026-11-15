@@ -245,7 +245,7 @@ def test_slide_still_penalizes_joint_motion_only_in_the_slide_phase():
     torch.testing.assert_close(
         Go2LowFric._reward_slide_still(state), torch.tensor([-4.0, 0.0])
     )
-    assert Go2LowFricRunnerCfg().critic.reward.weights.slide_still == 0.0
+    assert Go2LowFricRunnerCfg().critic.reward.weights.slide_still == 3.0
 
 
 def test_play_slide_schedule_sets_the_phase_for_phase_aware_policies():
