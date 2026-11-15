@@ -27,6 +27,13 @@ class Go2LowFricCfg(Go2Cfg):
         # Seconds at zero after the slide stops; then the slide ends and the
         # env gets normal random commands (turning in place included).
         slide_stop_hold_time = 0.5
+        # Residual hold (run 12): during the slide phase, joint targets
+        # (offsets from the standing pose) are multiplied by this, so the
+        # policy keeps ~20% authority to balance around the standing pose.
+        # Scripted full hold (scale 0) brakes at ~mu*g on mu <= 0.1 but fell
+        # 88% at mu = 0.2, v0 = 1.2; the learned slide (scale 1) only
+        # reached 0.66-0.85 mu*g.
+        slide_action_scale = 0.2
 
     class domain_randomization(Go2Cfg.domain_randomization):
         class startup(Go2Cfg.domain_randomization.startup):
@@ -95,13 +102,12 @@ class Go2LowFricRunnerCfg(Go2RunnerCfg):
                 # 0.24 -> 0.45 rad), barely improved braking, and stiffened
                 # walking (25/30, top speed 2.74 -> 2.03 m/s at mu = 1).
                 slide_still = 0.0
-                # Standing-pose hold during the slide phase only. Initial
-                # value 3.0 (runs 9-10). Frozen in the standing pose with no
-                # policy, the robot slides at 0.95-1.01 mu*g, the ideal, so
-                # pull harder toward that pose (run 11). Run Nov15_07-35-27_
-                # scores -0.060 per step unweighted in its slides: ~-0.6 at
-                # this weight, against ~3.8 for tracking_lin_vel.
-                slide_pose = 10.0
+                # Standing-pose hold during the slide phase only. 3.0 as in
+                # runs 9-10 and 12. Run 11 (Nov15_18-40-46_) tried 10.0: pose
+                # got worse (0.24 -> 0.34 rad) and walking degraded (22/30),
+                # so the slide is now constrained via slide_action_scale
+                # instead of a heavier penalty.
+                slide_pose = 3.0
 
     class algorithm(Go2RunnerCfg.algorithm):
         # Initial value: 0.01 (inherited from LeggedRobotRunnerCfg).

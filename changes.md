@@ -15,7 +15,8 @@ Everything below is committed as of `03666c4`, except the **run 8** changes mark
 | `0401678` | Run 8: slide ends after a 0.5 s hold, `slide_phase` observation, `slide_still` reward (off); legend placement in `plot_friction_eval.py` |
 | `2f3bac0` | Run 9: `slide_pose` reward (weight 3); slide metrics `min_foot_loaded_fraction`, `pose_rmse_rad` |
 | `f62a2a5` | Run 10: `slide_still` weight 0 → 3; slide steps count only after ≥ 50 ms in the air (`count_steps`), contact chatter reported as `contact_breaks_per_s` |
-| *(uncommitted)* | Run 11: `slide_still` 3 → 0, `slide_pose` 3 → 10 |
+| `78b0b02` | Run 11: `slide_still` 3 → 0, `slide_pose` 3 → 10 |
+| *(uncommitted)* | Run 12: residual hold (`commands.slide_action_scale` 0.2, `Go2LowFric._apply_slide_action_scale` in `_pre_decimation_step`); `slide_pose` back to 3 |
 
 Run tests (`env -u PYTHONPATH` keeps the ROS Python path out of the venv):
 

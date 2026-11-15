@@ -34,7 +34,8 @@ Engineering notebook to record the process of training, assumptions, edits, and 
 | 8 | **`Nov15_06-56-01_`** | Slide ends after 0.5 s hold; `slide_phase` observation | **28/30**, turning back; CoT 0.95–1.31 (lowest yet). Slide: 1.5–2.2× pure-slide distance, 0.61–0.78 μg, 15–35% less energy, but brakes by stepping (all-4-feet 2–6%). |
 | 9 | **`Nov15_07-35-27_`** (new best) | + `slide_pose` (hold standing pose while sliding, weight 3) | 28/30; drift when stopped ≈ 0. Slide: pose dev 0.43 → 0.24 rad, least-used foot 3–13% → 42–83%, all 4 feet down up to 61%, energy/m ↓. Rear-left leg also used when **walking** now. Decel still 0.66–0.85 μg. |
 | 10 | `Nov15_16-53-07_` | + `slide_still` weight 3 | Joint speed in slide halved (1.34 → 0.65 rad/s), energy/m ↓, decel 0.62–0.82 μg (≈ run 9). But froze in a non-standing pose (dev 0.24 → 0.45 rad) and walking got stiffer: 25/30, top speed 2.74 → 2.03 m/s at μ = 1, ground CoT ↑. Run 9 stays best overall. |
-| 11 | pending | `slide_still` 3 → 0; `slide_pose` 3 → 10 | Target: freeze in the **standing** pose (sim: 0.95–1.01 μg when frozen there) and walking back to run 9 (28/30, 2.74 m/s). |
+| 11 | `Nov15_18-40-46_` | `slide_still` 3 → 0; `slide_pose` 3 → 10 | Slide decel 0.75–0.87 μg (slightly ↑) but pose dev 0.32–0.36 rad (worse than run 9) and more steps; walking much worse: 22/30, CoT at 1 m/s 1.95–3.29, ground turning broken. Run 9 stays best. |
+| 12 | pending | Run 9 weights (`slide_pose` 3) + residual hold: slide-phase joint targets × 0.2 | Preview with run 9's policy (untrained for it): 0.84–1.08 μg on μ ≤ 0.1, no falls at μ = 0.2 but weak braking there (0.44–0.50 μg). |
 
 ### Result figures
 
@@ -154,9 +155,34 @@ Each run keeps the same color in every figure. Data: `logs/eval/*.json`.
    - *Simulator check:* the robot **frozen in its standing pose** with no policy, launched at 1.2 m/s, decelerates at **0.95–1.01 μg** (μ 0.05–0.5). MuJoCo gives full sliding friction; the gap is the policy. Freezing in the standing pose is the ideal slide.
    - *Conclusion:* `slide_still` froze the robot, but in a crouched, non-standing pose, and leaked stiffness into walking. The target is specifically "freeze in the standing pose".
 
-8. **Pull harder toward the standing pose** (run 11, pending)
+8. **Pull harder toward the standing pose** (run 11, `Nov15_18-40-46_`)
    - *Change:* `slide_still` 3 → 0 (it caused the crouch and the stiff walking); `slide_pose` 3 → 10. Run 9 scores −0.060 per step unweighted in its slides, so ≈ −0.6 at weight 10, vs ≈ 3.8 for tracking.
    - *Success:* pose dev well below run 9's 0.24 rad, decel → 0.95 μg (the frozen-pose sim result), distance ratio → 1, walking back to run 9 (28/30, top speed 2.74 m/s at μ = 1).
+   - *Result* (`logs/eval/slide_run11.json`, video `logs/videos/run11_slide_mu0.1_v1.2.mp4`): decel 0.75–0.87 μg, distance ratio 1.33–1.63 (slightly better than run 9), but pose dev **0.32–0.36 rad** (run 9: 0.24) and 1.5–8 real steps/s. Walking: 22/30, matched-speed CoT at 1 m/s 1.95–3.29 (run 9: 1.02–1.21), top speed 2.13 m/s at μ = 1, turn-in-place on ground broken (0.74 rad/s). A heavier pose penalty did not buy a better pose and damaged walking.
+   - *Scripted test (option b, no training):* run 9's policy for the run-up, then the PD controller holds the standing pose (targets 0) during the slide phase:
+
+     | μ | v0 | Learned (run 9): dist ratio / decel ÷ μg | **Scripted hold**: dist ratio / decel ÷ μg | Scripted: fell |
+     |---|---|---|---|---|
+     | 0.05 | 0.8 | 1.53 / 0.81 | **1.26 / 0.92** | 0% |
+     | 0.05 | 1.2 | 1.69 / 0.67 | **1.16 / 1.00** | 0% |
+     | 0.1 | 0.8 | 1.55 / 0.82 | **1.16 / 0.95** | 0% |
+     | 0.1 | 1.2 | 1.54 / 0.79 | **1.09 / 1.01** | 0% |
+     | 0.2 | 0.8 | 1.81 / 0.66 | 1.57 / 0.77 | 0% |
+     | 0.2 | 1.2 | 1.77 / 0.69 | 2.94 / 0.31 | **88%** |
+
+   - *Insight:* a rigid standing pose brakes at ≈ μg on real ice (μ ≤ 0.1), confirming the sim test. But at μ = 0.2 the braking force (2 m/s²) acts at the feet, below the center of mass, and pitches a rigid robot forward onto its nose. Braking harder needs active balance (leaning back), which explains why the learned policies settle at ~0.7–0.85 μg: they trade braking for staying upright.
+
+9. **Residual hold** (run 12, pending)
+   - *Change:* revert `slide_pose` to 3 (run 9's weights); new `commands.slide_action_scale = 0.2`. During the slide phase the joint targets (offsets from the standing pose) are multiplied by 0.2, applied inside the env step before the PD loop. The policy keeps ~20% authority (≈ ±0.25 rad at the thigh): enough to balance and lean back, not to splay or step. Constrains the action space instead of adding penalties, which stalled in runs 10–11.
+   - *Preview (run 9's policy, not trained for the hold):*
+
+     | μ | v0 | Dist ratio | Decel ÷ μg | All 4 feet | Pose dev (rad) | Fell |
+     |---|---|---|---|---|---|---|
+     | 0.05 | 1.2 | 1.11 | 1.06 | 62% | 0.21 | 0% |
+     | 0.1 | 1.2 | 1.25 | 0.84 | 50% | 0.23 | 0% |
+     | 0.2 | 1.2 | 1.79 | 0.50 | 8% | 0.24 | 0% |
+
+   - *Success:* keep ≈ μg on μ ≤ 0.1, raise braking at μ = 0.2 without falls, walking back to run 9 (28/30).
 
 ## Observations
 
@@ -169,13 +195,38 @@ Each run keeps the same color in every figure. Data: `logs/eval/*.json`.
 - **Survival:** 98–99.6% across full training-style episodes for the best policy (Fig. 4).
 - **Averages hide gait problems:** the per-foot load and touchdown checks and the videos found every lopsided gait.
 
-## Open items and next steps
+## Roadmap
 
-- Train and evaluate run 11 (option a: `slide_still` 0, `slide_pose` 10). Fallback (option b): hold the standing pose with the PD controller during the slide phase (scripted, ≈ μg by construction), RL for run-up and recovery.
-- Controlled stop from the goal (legs out in front, yaw torque): build on the slide phase once coasting works.
-- Sim-to-real:
-  - μ / body-velocity estimator (student policy); the actor currently gets no linear velocity.
-  - Continuous log-uniform μ instead of two bins.
-  - Friction-aware commands on ice.
-- Revisit: stand-still episodes and decentralized phase oscillators (fix 8 Hz stepping).
-- Try and implement anisotropic friction model to get a "skating gait"
+Each stage changes one big thing (behavior → physics → structure), so results stay attributable.
+
+1. **Finish controlled sliding** (privileged μ, current stage)
+   - Run 12: residual hold (option c) on run 9's weights. Fallback (option b): scripted standing-pose hold only where stable (μ ≤ ~0.1).
+   - *Done when:* slide brakes at ≥ 0.9 μg and walking stays ~28/30.
+   - Extensions from the goal: controlled stop variants (yaw/spin to reorient while sliding). On flat isotropic ice, legs out cannot brake harder than μg.
+
+2. **Skate-like feet: anisotropic friction, physics first**
+   - Foot contacts with low friction along a "blade" direction and high friction across it. Hard part: the blade direction must follow each foot's heading (check how MuJoCo orients contact friction frames for the foot geometry).
+   - *Validate with no policy* (like the frozen-pose test): launched forward, the frozen robot should glide far (decel ≈ μ_along·g); launched sideways, it should stop quickly. Don't train until this holds.
+   - Note: anisotropy comes from the feet (blades/wheels), so it applies on every surface; a skating Go2 is effectively a different robot, not a reaction to slipping.
+
+3. **Skating without oscillators** (baseline)
+   - Start from the `go2_lowfric` config on the new feet; turn the glide reward back on (gliding now pays physically).
+   - Evaluate with matched-speed CoT, top speed, slide/glide metrics, videos; compare against walking on ice.
+
+4. **Decentralized oscillators (DCPG) only if needed**
+   - Add a `go2_skate_osc` variant (per-leg oscillators with ground-force feedback, policy outputs residuals + frequency/coupling modulation, oscillators held in stance during the slide phase) if stage 3 shows:
+     - no regular push-glide stroke (fast irregular stepping instead);
+     - no CoT or top-speed gain over walking on ice despite the physics allowing it;
+     - persistent asymmetry (tucked leg, one side doing all pushing);
+     - unstable results across runs/seeds.
+   - Compare against the stage 3 baseline on the same evaluations.
+
+**Deployable version (μ estimation)**, independent of stages 2–4:
+- Replace privileged μ with an estimate from proprioceptive history (student policy / state estimator); the actor also gets no linear velocity yet.
+- Train with friction patches (μ changes mid-episode) so the switch is learned and testable.
+- For real hardware, do this right after stage 1; if skating stays a simulation study, it can wait until after stage 4.
+
+**Other open items**
+- Continuous log-uniform μ instead of two bins; friction-aware commands on ice.
+- Slide phase ends on a schedule, not on the robot's actual stop; consider a speed-based end (needs a velocity estimate).
+- Revisit: stand-still episodes.

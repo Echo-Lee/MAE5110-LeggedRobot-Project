@@ -289,7 +289,7 @@ def test_slide_pose_penalizes_leaving_the_standing_pose_only_in_the_slide():
         Go2LowFric._reward_slide_pose(state),
         torch.tensor([0.0, -(0.6**2) / 12, 0.0]),
     )
-    assert Go2LowFricRunnerCfg().critic.reward.weights.slide_pose == 10.0
+    assert Go2LowFricRunnerCfg().critic.reward.weights.slide_pose == 3.0
 
 
 def test_slide_pose_runs_on_a_real_env(env):
@@ -297,3 +297,60 @@ def test_slide_pose_runs_on_a_real_env(env):
     env.step()
     pose = env._reward_slide_pose()
     assert pose.shape == (8,) and (pose <= 0).all() and torch.isfinite(pose).all()
+
+
+# --- run 12: residual hold during the slide phase ---------------------------------
+
+
+def test_residual_hold_scales_targets_only_in_the_slide_phase(env):
+    scale = env.cfg.commands.slide_action_scale
+    assert scale == pytest.approx(0.2)
+    env.dof_pos_target[:] = 0.5
+    env.slide_phase[:] = 0.0
+    env.slide_phase[[1, 4]] = 1.0
+    env._apply_slide_action_scale()
+    expected = torch.full_like(env.dof_pos_target, 0.5)
+    expected[[1, 4]] = 0.5 * scale
+    torch.testing.assert_close(env.dof_pos_target, expected)
+
+
+def test_zero_scale_holds_exactly_the_standing_pose(env):
+    env.cfg.commands.slide_action_scale = 0.0
+    env.dof_pos_target[:] = 0.7
+    env.slide_phase[:] = 1.0
+    env._apply_slide_action_scale()
+    # Targets are offsets from the standing pose: zero offset = standing pose.
+    assert (env.dof_pos_target == 0).all()
+
+
+def test_scale_is_applied_inside_the_env_step(env):
+    env.slide_phase[:] = 1.0
+    env.dof_pos_target[:] = 0.5
+    env._pre_decimation_step()
+    torch.testing.assert_close(
+        env.dof_pos_target, torch.full_like(env.dof_pos_target, 0.1)
+    )
+
+
+def test_runs_before_the_residual_hold_keep_full_authority(env):
+    from types import SimpleNamespace
+
+    settings = env.cfg.commands
+    env.cfg.commands = SimpleNamespace(
+        **{
+            key: getattr(settings, key)
+            for key in (
+                "resampling_time",
+                "slide_probability",
+                "slide_max_friction",
+                "slide_speed_range",
+                "slide_runup_time",
+                "slide_decel_scale",
+                "slide_stop_hold_time",
+            )
+        }
+    )
+    env.dof_pos_target[:] = 0.5
+    env.slide_phase[:] = 1.0
+    env._apply_slide_action_scale()
+    assert (env.dof_pos_target == 0.5).all()

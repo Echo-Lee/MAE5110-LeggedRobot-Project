@@ -69,6 +69,30 @@ class Go2LowFric(Go2):
         commands = self.cfg.commands
         return commands if hasattr(commands, "slide_probability") else None
 
+    def _pre_decimation_step(self):
+        super()._pre_decimation_step()
+        self._apply_slide_action_scale()
+
+    def _apply_slide_action_scale(self):
+        """Residual hold: shrink joint targets toward the standing pose.
+
+        dof_pos_target is an offset from the standing pose, so scaling it by
+        slide_action_scale during the slide phase leaves the standing pose
+        plus a small learned correction: enough to balance and lean, not to
+        splay or step. A rigid standing pose brakes at ~mu*g but tips over
+        at higher friction (scripted test on run Nov15_07-35-27_), so the
+        policy keeps a little authority. Applied before the PD loop, so
+        training, evaluation and playback all see it.
+        """
+        settings = self._slide_settings()
+        # Snapshots of runs before the residual hold lack the setting; they
+        # were trained with full authority in the slide.
+        scale = getattr(settings, "slide_action_scale", None) if settings else None
+        if scale is None:
+            return
+        factor = 1.0 - (1.0 - scale) * self.slide_phase
+        self.dof_pos_target *= factor
+
     def _post_decimation_step(self):
         super()._post_decimation_step()  # may resample commands
         loaded = self.contact_forces[:, self.feet_indices, 2] > FOOT_LOAD_THRESHOLD_N
