@@ -33,7 +33,8 @@ Engineering notebook to record the process of training, assumptions, edits, and 
 | 7 | `Nov15_06-10-02_` | Glide off; run-up-and-slide episodes | No coasting: still steps (~48 touchdowns/s), slides 2.3–4× the pure-slide distance. Lost turn-in-place; 14/30. Gains: all 4 feet, ~5 steps/s/foot, less drift. |
 | 8 | **`Nov15_06-56-01_`** | Slide ends after 0.5 s hold; `slide_phase` observation | **28/30**, turning back; CoT 0.95–1.31 (lowest yet). Slide: 1.5–2.2× pure-slide distance, 0.61–0.78 μg, 15–35% less energy, but brakes by stepping (all-4-feet 2–6%). |
 | 9 | **`Nov15_07-35-27_`** (new best) | + `slide_pose` (hold standing pose while sliding, weight 3) | 28/30; drift when stopped ≈ 0. Slide: pose dev 0.43 → 0.24 rad, least-used foot 3–13% → 42–83%, all 4 feet down up to 61%, energy/m ↓. Rear-left leg also used when **walking** now. Decel still 0.66–0.85 μg. |
-| 10 | pending | + `slide_still` weight 3 (damp joint motion while sliding) | Target: decel → μg, less chatter. Run 9 baseline: 0.7–5 real steps/s, 43–78 contact breaks/s in the slide. |
+| 10 | `Nov15_16-53-07_` | + `slide_still` weight 3 | Joint speed in slide halved (1.34 → 0.65 rad/s), energy/m ↓, decel 0.62–0.82 μg (≈ run 9). But froze in a non-standing pose (dev 0.24 → 0.45 rad) and walking got stiffer: 25/30, top speed 2.74 → 2.03 m/s at μ = 1, ground CoT ↑. Run 9 stays best overall. |
+| 11 | pending | `slide_still` 3 → 0; `slide_pose` 3 → 10 | Target: freeze in the **standing** pose (sim: 0.95–1.01 μg when frozen there) and walking back to run 9 (28/30, 2.74 m/s). |
 
 ### Result figures
 
@@ -136,10 +137,26 @@ Each run keeps the same color in every figure. Data: `logs/eval/*.json`.
    - *Normal walking:* 28/30; drift when commanded to stop ≈ 0.00–0.01 m/s (best yet); top speed 1.23 m/s at μ = 0.05, 2.74 at μ = 1 (best yet); CoT at 1 m/s 1.02–1.21. Turning in place on ice is weaker (0.47 rad/s error at μ = 0.05).
    - *Still open:* decel 0.66–0.85 μg, not μg; residual joint motion ~1.2 rad/s and uneven foot loads in the slide. Next: `slide_still` (damp joint motion), and a touchdown metric with a minimum air time.
 
-7. **Damp joint motion while sliding** (run 10, pending)
+7. **Damp joint motion while sliding** (run 10, `Nov15_16-53-07_`)
    - *Metric fix first:* slide touchdowns now count only landings after ≥ 50 ms in the air (`touchdowns_per_s`); every reloading is reported separately (`contact_breaks_per_s`). Re-evaluated run 9: **0.7–5 real steps/s** (fewest on the slickest ice) vs 43–78 contact breaks/s. Run 9 already mostly stands in the slide; the remaining gap to μg is bouncing and joint motion, not stepping.
    - *Change:* `slide_still` 0 → 3. Run 9 scores −0.183 per step in its slides (≈ −0.55 weighted) vs ≈ 3.8 for tracking.
    - *Success:* decel ratio and distance ratio → 1, contact breaks/s ↓, joint speed in the slide ↓ (run 9: ~1.2 rad/s), walking grid unchanged (28/30).
+   - *Result, slide* (`logs/eval/slide_run10.json`, video `logs/videos/run10_slide_mu0.1_v1.2.mp4`), v0 = 1.2:
+
+     | μ | Distance ratio (run 9) | Decel ÷ μg (run 9) | Steps/s (run 9) | Chatter/s (run 9) | Pose dev rad (run 9) | Energy J/m (run 9) |
+     |---|---|---|---|---|---|---|
+     | 0.05 | 1.38 (1.71) | 0.82 (0.67) | 0.8 (0.7) | 49 (49) | 0.50 (0.24) | 85 (135) |
+     | 0.1 | 1.37 (1.51) | 0.80 (0.79) | 2.1 (2.5) | 71 (66) | 0.48 (0.24) | 81 (111) |
+     | 0.2 | 1.67 (1.78) | 0.62 (0.69) | 5.6 (5.1) | 62 (78) | 0.43 (0.24) | 136 (117) |
+
+   - *Walking:* 25/30 (run 9: 28); top speed 1.03 / 2.03 m/s at μ = 0.05 / 1 (run 9: 1.23 / 2.74); CoT at 1 m/s 1.07–1.44 (run 9: 1.02–1.21). Turning in place on ice improved (0.18 vs 0.47 rad/s). The stillness penalty made the whole gait stiffer, not just the slide.
+   - *Why decel is still < μg* (force analysis at μ = 0.1, while moving): braking force = 0.74 μN (run 9) / 0.76 μN (run 10) even though 97–99% of loaded feet slide and carry the full weight. Slip is only partly along the travel direction (0.72 / 0.86) and the legs still move.
+   - *Simulator check:* the robot **frozen in its standing pose** with no policy, launched at 1.2 m/s, decelerates at **0.95–1.01 μg** (μ 0.05–0.5). MuJoCo gives full sliding friction; the gap is the policy. Freezing in the standing pose is the ideal slide.
+   - *Conclusion:* `slide_still` froze the robot, but in a crouched, non-standing pose, and leaked stiffness into walking. The target is specifically "freeze in the standing pose".
+
+8. **Pull harder toward the standing pose** (run 11, pending)
+   - *Change:* `slide_still` 3 → 0 (it caused the crouch and the stiff walking); `slide_pose` 3 → 10. Run 9 scores −0.060 per step unweighted in its slides, so ≈ −0.6 at weight 10, vs ≈ 3.8 for tracking.
+   - *Success:* pose dev well below run 9's 0.24 rad, decel → 0.95 μg (the frozen-pose sim result), distance ratio → 1, walking back to run 9 (28/30, top speed 2.74 m/s at μ = 1).
 
 ## Observations
 
@@ -154,7 +171,7 @@ Each run keeps the same color in every figure. Data: `logs/eval/*.json`.
 
 ## Open items and next steps
 
-- Train and evaluate run 10 (`slide_still` = 3).
+- Train and evaluate run 11 (option a: `slide_still` 0, `slide_pose` 10). Fallback (option b): hold the standing pose with the PD controller during the slide phase (scripted, ≈ μg by construction), RL for run-up and recovery.
 - Controlled stop from the goal (legs out in front, yaw torque): build on the slide phase once coasting works.
 - Sim-to-real:
   - μ / body-velocity estimator (student policy); the actor currently gets no linear velocity.

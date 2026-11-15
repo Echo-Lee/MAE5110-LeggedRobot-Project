@@ -89,17 +89,19 @@ class Go2LowFricRunnerCfg(Go2RunnerCfg):
                 # touchdowns). Kept available for later experiments.
                 glide = 0.0
                 ice_touchdowns = 0.0
-                # Joint-velocity penalty during the slide phase only (run 10).
-                # Initial value 0.0 (runs 7-9). Run Nov15_07-35-27_ still moves
-                # its joints ~1.2 rad/s while sliding and brakes at only
-                # 0.66-0.85 mu*g; it scores -0.183 per step unweighted, so
-                # ~-0.55 at this weight, against ~3.8 for tracking_lin_vel.
-                slide_still = 3.0
-                # Standing-pose hold during the slide phase only. Run
-                # Nov15_06-56-01_ scores ~0.19 rad^2 in its slides (legs
-                # splayed, rear-left leg up), so ~-0.56 per step at this
-                # weight, against ~3.5 for tracking_lin_vel.
-                slide_pose = 3.0  # new term (default 0: absent)
+                # Joint-velocity penalty during the slide phase only. Off
+                # (run 11). Trained value 3.0 (run 10, Nov15_16-53-07_): it
+                # froze the robot in a crouched, non-standing pose (pose dev
+                # 0.24 -> 0.45 rad), barely improved braking, and stiffened
+                # walking (25/30, top speed 2.74 -> 2.03 m/s at mu = 1).
+                slide_still = 0.0
+                # Standing-pose hold during the slide phase only. Initial
+                # value 3.0 (runs 9-10). Frozen in the standing pose with no
+                # policy, the robot slides at 0.95-1.01 mu*g, the ideal, so
+                # pull harder toward that pose (run 11). Run Nov15_07-35-27_
+                # scores -0.060 per step unweighted in its slides: ~-0.6 at
+                # this weight, against ~3.8 for tracking_lin_vel.
+                slide_pose = 10.0
 
     class algorithm(Go2RunnerCfg.algorithm):
         # Initial value: 0.01 (inherited from LeggedRobotRunnerCfg).

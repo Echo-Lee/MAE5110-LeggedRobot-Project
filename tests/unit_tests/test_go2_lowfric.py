@@ -245,7 +245,7 @@ def test_slide_still_penalizes_joint_motion_only_in_the_slide_phase():
     torch.testing.assert_close(
         Go2LowFric._reward_slide_still(state), torch.tensor([-4.0, 0.0])
     )
-    assert Go2LowFricRunnerCfg().critic.reward.weights.slide_still == 3.0
+    assert Go2LowFricRunnerCfg().critic.reward.weights.slide_still == 0.0
 
 
 def test_play_slide_schedule_sets_the_phase_for_phase_aware_policies():
@@ -289,7 +289,7 @@ def test_slide_pose_penalizes_leaving_the_standing_pose_only_in_the_slide():
         Go2LowFric._reward_slide_pose(state),
         torch.tensor([0.0, -(0.6**2) / 12, 0.0]),
     )
-    assert Go2LowFricRunnerCfg().critic.reward.weights.slide_pose == 3.0
+    assert Go2LowFricRunnerCfg().critic.reward.weights.slide_pose == 10.0
 
 
 def test_slide_pose_runs_on_a_real_env(env):
