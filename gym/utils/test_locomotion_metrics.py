@@ -122,3 +122,82 @@ def test_all_failed_during_warmup_has_undefined_metrics():
     assert result["samples"] == 0
     assert result["linear_rmse_m_s"] is None
     assert result["cost_of_transport"] is None
+
+
+def _straight_trace(steps=100, replicas=4, speed=1.0, power=150.0):
+    t = torch.arange(steps, dtype=torch.float)[:, None].repeat(1, replicas)
+    position = torch.zeros(steps, replicas, 2)
+    position[..., 0] = speed * DT * (t + 1)
+    return {
+        "alive": torch.ones(steps, replicas, dtype=torch.bool),
+        "forward_speed": torch.full((steps, replicas), speed),
+        "position": position,
+        "power_abs": torch.full((steps, replicas), power),
+        "power_positive": torch.full((steps, replicas), power / 2),
+    }
+
+
+def test_replica_cot_matches_hand_computation():
+    from gym.utils.locomotion_metrics import replica_speed_and_cot
+
+    trace = _straight_trace(speed=1.0, power=150.0)
+    trace["alive"][60:, 3] = False
+    result = replica_speed_and_cot(trace, dt=DT, warmup_steps=0, mass_kg=MASS)
+    # Window spans 99 position intervals but 100 power samples.
+    expected = 150.0 * 100 * DT / (MASS * GRAVITY_M_S2 * 0.99)
+    torch.testing.assert_close(result["cot"], torch.full((4,), expected))
+    torch.testing.assert_close(result["cot_positive_work"], result["cot"] / 2)
+    torch.testing.assert_close(result["speed"], torch.ones(4))
+    assert result["survived"].tolist() == [True, True, True, False]
+
+
+def test_sideways_wobble_is_not_distance():
+    from gym.utils.locomotion_metrics import replica_speed_and_cot
+
+    trace = _straight_trace(steps=101, replicas=1)
+    trace["position"][1::2, 0, 1] = 0.05  # zig-zag 5 cm every step
+    result = replica_speed_and_cot(trace, dt=DT, warmup_steps=0, mass_kg=MASS)
+    straight = replica_speed_and_cot(
+        _straight_trace(steps=101, replicas=1), dt=DT, warmup_steps=0, mass_kg=MASS
+    )
+    torch.testing.assert_close(result["cot"], straight["cot"])
+
+
+def _point(speed, cot):
+    return {
+        "speed": speed,
+        "cot": cot,
+        "cot_std": 0.1,
+        "cot_positive_work": cot / 2,
+        "cot_positive_work_std": 0.05,
+    }
+
+
+def test_cot_is_interpolated_at_the_actual_speed_not_the_command():
+    from gym.utils.locomotion_metrics import cot_at_speed
+
+    # Out of order on purpose: points are sorted by the speed actually reached.
+    points = [_point(1.4, 3.0), _point(0.6, 1.0), _point(1.0, 2.0)]
+    result = cot_at_speed(points, 1.2)
+    assert result["status"] == "ok"
+    assert result["cot"] == pytest.approx(2.5)
+    assert result["cot_positive_work"] == pytest.approx(1.25)
+    assert result["top_speed_m_s"] == pytest.approx(1.4)
+    assert cot_at_speed(points, 1.0)["cot"] == pytest.approx(2.0)
+
+
+def test_speed_above_top_speed_is_unreachable():
+    from gym.utils.locomotion_metrics import cot_at_speed
+
+    result = cot_at_speed([_point(0.4, 1.0), _point(0.8, 1.5)], 1.5)
+    assert result["status"] == "unreachable"
+    assert result["cot"] is None
+    assert result["top_speed_m_s"] == pytest.approx(0.8)
+
+
+def test_wide_gap_is_not_interpolated():
+    from gym.utils.locomotion_metrics import cot_at_speed
+
+    result = cot_at_speed([_point(0.2, 1.0), _point(1.6, 1.5)], 1.0, max_gap=0.5)
+    assert result["status"] == "not_bracketed"
+    assert result["cot"] is None

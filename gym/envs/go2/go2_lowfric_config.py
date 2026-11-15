@@ -24,6 +24,18 @@ class Go2LowFricCfg(Go2Cfg):
     class scaling(Go2Cfg.scaling):
         contact_friction = 1.0
 
+    class reward_settings(Go2Cfg.reward_settings):
+        # Glide reward (Go2LowFric._reward_glide). The friction gate is
+        # sigmoid((threshold - mu) / width): ~0.88-0.99 on the ice bin
+        # (mu 0.05-0.2), ~0.003 or less on the ground bin (mu >= 0.6).
+        glide_friction_threshold = 0.3
+        glide_friction_width = 0.05
+        # Commanded planar speed (m/s) above which gliding is rewarded; also
+        # the body speed below which the reward is scaled down.
+        glide_min_command = 0.3
+        # Go2 foot collision sphere radius (resources/robots/go2/urdf/go2.urdf).
+        foot_radius = 0.022
+
 
 class Go2LowFricRunnerCfg(Go2RunnerCfg):
     class actor(Go2RunnerCfg.actor):
@@ -44,6 +56,10 @@ class Go2LowFricRunnerCfg(Go2RunnerCfg):
                 # torque is lowest when load is shared by all legs.
                 power = 1.0e-3  # new term (default 0: absent)
                 torques = 1.5e-3  # initial value: 5.0e-6 (inherited from go2)
+                # Glide reward, in [0, 1] per step. Run Nov14_23-04-56_ (no
+                # glide term) already scores 0.10 per step on ice and 0.00 on
+                # ground with it, against tracking_lin_vel's weight of 4.0.
+                glide = 1.0  # new term (default 0: absent)
 
     class algorithm(Go2RunnerCfg.algorithm):
         # Initial value: 0.01 (inherited from LeggedRobotRunnerCfg).

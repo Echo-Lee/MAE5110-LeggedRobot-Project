@@ -17,8 +17,7 @@ TORQUE_SATURATION_FRACTION = 0.99
 def contact_point_velocity(
     lin_vel: torch.Tensor, ang_vel: torch.Tensor, radius: float
 ) -> torch.Tensor:
-    """World velocity of the lowest point of a spherical foot.
-    """
+    """World velocity of the lowest point of a spherical foot."""
     offset = torch.zeros_like(ang_vel)
     offset[..., 2] = -radius
     return lin_vel + torch.cross(ang_vel, offset, dim=-1)
@@ -128,3 +127,80 @@ def summarize_locomotion(
     result["torque_saturation_fraction"] = saturated[valid].float().mean().item()
     result["mean_base_height_m"] = mean(trace["base_height"])
     return result
+
+
+def replica_speed_and_cot(
+    trace: dict[str, torch.Tensor],
+    *,
+    dt: float,
+    warmup_steps: int,
+    mass_kg: float,
+) -> dict[str, torch.Tensor]:
+    """Per-replica steady forward speed and cost of transport.
+
+    Required trace keys (T steps, R replicas): ``alive`` [T, R] bool,
+    absorbing; ``forward_speed`` [T, R] body-frame vx in m/s; ``position``
+    [T, R, 2] world xy; ``power_abs`` and ``power_positive`` [T, R] in W,
+    i.e. sum |tau*qdot| and sum max(tau*qdot, 0). CoT uses net displacement
+    over the measured window, so sideways wobble does not count as distance.
+    Returns [R] tensors; ``survived`` marks replicas that never fell.
+    """
+    window = slice(warmup_steps, None)
+    position = trace["position"][window]
+    distance = (position[-1] - position[0]).norm(dim=-1)
+    weight = mass_kg * GRAVITY_M_S2
+
+    def cot(key):
+        energy = trace[key][window].sum(dim=0) * dt
+        return energy / (weight * distance.clamp_min(1e-9))
+
+    return {
+        "survived": trace["alive"].bool()[-1],
+        "speed": trace["forward_speed"][window].mean(dim=0),
+        "cot": cot("power_abs"),
+        "cot_positive_work": cot("power_positive"),
+    }
+
+
+def cot_at_speed(
+    points: list[dict], target_speed: float, *, max_gap: float = 0.5
+) -> dict:
+    """Cost of transport at an exact actual speed, by linear interpolation.
+
+    ``points`` holds one entry per commanded speed at a single friction, each
+    with the mean actual ``speed`` reached and the mean ``cot`` (plus its
+    replica ``cot_std``) over surviving replicas. Points are ordered by
+    actual speed, so commanded-speed tracking error does not matter: the CoT
+    is read off at the speed actually achieved. The target must be bracketed
+    by two points no more than ``max_gap`` m/s apart; otherwise the result
+    is ``None`` (``unreachable`` when the target exceeds every reached speed).
+    """
+    points = sorted(points, key=lambda p: p["speed"])
+    top_speed = points[-1]["speed"] if points else None
+    result = {"target_speed_m_s": target_speed, "top_speed_m_s": top_speed}
+    for low, high in zip(points, points[1:]):
+        if low["speed"] <= target_speed <= high["speed"]:
+            if high["speed"] - low["speed"] > max_gap:
+                break
+            span = high["speed"] - low["speed"]
+            w = 0.0 if span == 0 else (target_speed - low["speed"]) / span
+            mix = lambda key: (1 - w) * low[key] + w * high[key]  # noqa: E731
+            return result | {
+                "status": "ok",
+                "cot": mix("cot"),
+                "cot_std": mix("cot_std"),
+                "cot_positive_work": mix("cot_positive_work"),
+                "cot_positive_work_std": mix("cot_positive_work_std"),
+            }
+    status = (
+        "unreachable"
+        if top_speed is None or target_speed > top_speed
+        else "not_bracketed"
+    )
+    return result | {
+        "status": status,
+        "cot": None,
+        "cot_std": None,
+        "cot_positive_work": None,
+        "cot_positive_work_std": None,
+    }

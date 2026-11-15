@@ -271,6 +271,21 @@ orbits and zooms around the robot; press `F` to toggle the lock, or pass
 keep their configured camera. Other viewers keep their configured camera and
 print a warning.
 
+`--friction MU` fixes every environment's contact friction (replacing the
+task's friction randomization) and `--command VX VY YAW` holds one velocity
+command (keyboard teleop is then disabled). `--video PATH` records
+environment 0 to an MP4 off-screen instead of opening a viewer (MuJoCo CPU
+backend, needs `ffmpeg`): real time at 50 fps, camera following the robot,
+`--video_seconds` long, with an overlay of time, friction, command vs actual
+velocity, and loaded feet (`--no-overlay` to omit). Recordings use nominal
+link masses so the ground texture and lighting are kept, and `MUJOCO_GL=egl`
+is selected automatically when there is no display.
+
+```bash
+uv run --frozen scripts/play.py --task go2_lowfric --load_run RUN --original_cfg \
+  --friction 0.1 --command 1.0 0 0 --video logs/videos/ice.mp4
+```
+
 Only the saved config modules and their saved config dependencies are loaded.
 The current task implementation, learning stack, and selected physics backend
 remain active. This makes the option suitable for recent compatible runs while
@@ -390,6 +405,17 @@ Cases on ice (mu <= 0.2) and ground (mu >= 0.6) carry declared bounds for
 measure its reliance on the privileged observation.
 `notebooks/molab_lowfric.py` runs the same train/evaluate/compare workflow on
 MoLab.
+
+`scripts/evaluate_cot_vs_friction.py` compares cost of transport across
+friction at matched *actual* speed. Policies do not hold commanded speed
+exactly, so each friction coefficient is run with a sweep of straight-ahead
+commands; every command yields an (actual speed, CoT) point and CoT is
+interpolated at exact target speeds (0.5, 1.0, 1.5 m/s by default). Targets
+faster than any speed reached are reported as unreachable, together with the
+top speed reached on each surface. CoT uses net displacement and is reported
+for both |joint work| and positive work only.
+`scripts/plot_cot_vs_friction.py` plots one panel per target speed plus the
+top-speed panel, for up to six policies.
 
 The gate measures planar velocity RMSE, yaw-rate RMSE, target/velocity jitter
 above 10 Hz (beyond the first three gait harmonics), target clipping, swing-phase
