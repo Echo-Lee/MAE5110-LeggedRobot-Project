@@ -1364,6 +1364,15 @@ class Go2OscPushGlide(Go2OscDirectional):
             or cap <= 0.0
         ):
             raise ValueError("tilt_rate_cap must be finite and positive")
+        # Configurations saved before this field existed leave targets unbounded.
+        limit = getattr(cfg.control, "action_limit", None)
+        if limit is not None and (
+            not isinstance(limit, (int, float))
+            or isinstance(limit, bool)
+            or not math.isfinite(limit)
+            or limit <= 0.0
+        ):
+            raise ValueError("action_limit must be None or finite and positive")
         # Both steering thresholds, or neither for the forward-only rule.
         steering = [
             getattr(cfg.osc, name, None)
@@ -1387,6 +1396,22 @@ class Go2OscPushGlide(Go2OscDirectional):
         self.contact_friction_obs = torch.zeros(self.num_envs, 1, device=self.device)
         self._refresh_traction_observations()
         self._refresh_friction_observation()
+
+    def _pre_decimation_step(self):
+        self._limit_joint_targets()
+        super()._pre_decimation_step()
+
+    def _limit_joint_targets(self):
+        """Bound the commanded joint offsets, in units of the policy action.
+
+        The policy sees its previous target, so an unbounded target can feed on
+        itself once the robot leaves the states it was trained on.
+        """
+        limit = getattr(self.cfg.control, "action_limit", None)
+        if limit is None:
+            return
+        bound = limit * self.scales["dof_pos_target"]
+        self.dof_pos_target.clamp_(-bound, bound)
 
     def _slow_command_mask(self):
         """Standing clocks only when no command asks the robot to move.

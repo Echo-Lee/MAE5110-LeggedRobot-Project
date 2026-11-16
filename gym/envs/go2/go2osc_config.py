@@ -330,6 +330,11 @@ class Go2OscPushGlideCfg(Go2OscORC111GRFDirectionalCfg):
             lin_vel_y = 0.3  # max [m/s]
             yaw_vel = 0.5  # max [rad/s]
 
+    class control(Go2OscORC111GRFDirectionalCfg.control):
+        # Largest joint-target offset the motors receive, in action units.
+        # Walking stays below 6; a falling robot used to command hundreds.
+        action_limit = 10.0
+
     class scaling(Go2OscORC111GRFDirectionalCfg.scaling):
         foot_traction_obs = 1.0
         contact_friction_obs = 1.0
