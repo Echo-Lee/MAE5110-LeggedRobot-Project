@@ -90,6 +90,9 @@ def load_policy(args):
     # This checkpoint predates the optional steering-specific clock schedule.
     for name in ("sideways_stop_threshold", "turning_stop_threshold"):
         setattr(cfg.osc, name, saved["env_config"]["osc"].get(name))
+    training.critic.reward.weights.tilt_rate = saved["runner_config"]["critic"][
+        "reward"
+    ]["weights"].get("tilt_rate", 0.0)
     cfg.env.num_envs = 1
     cfg.env.episode_length_s = args.duration + 5.0
     cfg.commands.resampling_time = args.duration + 10.0

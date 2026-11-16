@@ -342,6 +342,9 @@ class Go2OscPushGlideCfg(Go2OscORC111GRFDirectionalCfg):
         traction_ratio_limit = 2.0
         # Slow walking uses the moving clocks; only near-zero commands stand.
         stop_threshold = 0.2
+        # A sidestep or turn above these also uses the moving clocks.
+        sideways_stop_threshold = 0.1  # [m/s]
+        turning_stop_threshold = 0.1  # [rad/s]
 
     class reward_settings(Go2OscORC111GRFDirectionalCfg.reward_settings):
         # Load per foot that push_load credits [body weights]: a two-foot share.
@@ -350,6 +353,8 @@ class Go2OscPushGlideCfg(Go2OscORC111GRFDirectionalCfg):
         push_window_saturation = 0.5
         # Gaussian turning reward sized for the 0.5 rad/s command range.
         yaw_tracking_tolerance = 0.5
+        # Most that tilt_rate charges per step [rad^2/s^2]; 4 is 2 rad/s.
+        tilt_rate_cap = 4.0
 
 
 class Go2OscPushGlideRunnerCfg(Go2OscORC111GRFDirectionalRunnerCfg):
@@ -370,6 +375,8 @@ class Go2OscPushGlideRunnerCfg(Go2OscORC111GRFDirectionalRunnerCfg):
                 glide_drag = 5.0
                 # Vertical base speed: separates a grounded gait from hopping.
                 lin_vel_z = 2.0
+                # Squared roll and pitch rate: damps the rocking of the trot.
+                tilt_rate = 1.0
 
     class runner(Go2OscORC111GRFDirectionalRunnerCfg.runner):
         experiment_name = "go2osc_push_glide"

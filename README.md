@@ -133,6 +133,12 @@ from `[0.0, 1.5]` m/s, with standing and turning samples. Lateral and yaw
 commands are bounded by 0.3 m/s and 0.5 rad/s; commands resample every three
 seconds.
 
+The moving oscillator schedule is active above a forward command of 0.2 m/s,
+a lateral command of 0.1 m/s, or a yaw command of 0.1 rad/s, using absolute
+values. A pure turn uses ungated normal load; translation gates load along
+the requested travel direction. Training also penalizes squared roll and
+pitch rates with weight 1.0, capped at 4.0 rad²/s².
+
 ## Train from scratch
 
 Run from the repository root with Python 3.11. GPU training requires a
@@ -155,6 +161,10 @@ use `--device cpu --num_envs 16`; full training is intended for a GPU.
 The trained checkpoint is [policies/go2osc_push_glide/model_500.pt](policies/go2osc_push_glide/model_500.pt).
 Its configuration and training metadata are recorded in
 [policy.json](policies/go2osc_push_glide/policy.json).
+This checkpoint's saved configuration uses the forward-only oscillator
+schedule and has no tilt-rate reward. `scripts/play.py` uses current task
+defaults, including the steering schedule; the recorder below restores
+the checkpoint's saved configuration.
 Install the standard dependencies with `uv sync --frozen`, then run one of
 these commands from the repository root.
 
