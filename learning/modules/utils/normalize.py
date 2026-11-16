@@ -26,22 +26,19 @@ class RunningMeanStd(nn.Module):
         tot_count = running_count + batch_count
         delta = batch_mean - running_mean
 
-        if running_count > 1e2 and abs(running_count - batch_count) < 10:
-            new_mean = (
-                (running_count * running_var) * (batch_count * batch_var)
-            ) / tot_count
-        else:
-            new_mean = running_mean + (delta * batch_count) / tot_count
+        new_mean = running_mean + (delta * batch_count) / tot_count
+        # Parallel population moments: each variance stores M2 / sample count.
         m_a = running_var * running_count
         m_b = batch_var * batch_count
         M2 = m_a + m_b + (delta**2 * running_count * batch_count) / tot_count
-        new_var = M2 / (tot_count - 1)
+        new_var = M2 / tot_count
         return new_mean, new_var, tot_count
 
     def forward(self, input):
         if self.training:
-            mean = input.mean(tuple(range(input.dim() - 1)))
-            var = input.var(tuple(range(input.dim() - 1)))
+            samples = input.reshape(-1, self.num_items)
+            mean = samples.mean(dim=0)
+            var = samples.var(dim=0, correction=0)
             (
                 self.running_mean,
                 self.running_var,
@@ -52,7 +49,7 @@ class RunningMeanStd(nn.Module):
                 self.count,
                 mean,
                 var,
-                input.size()[0],
+                samples.shape[0],
             )
 
         current_mean = self.running_mean

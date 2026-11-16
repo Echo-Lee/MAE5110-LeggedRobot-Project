@@ -1,0 +1,162 @@
+{
+  "task": "go2osc_push_glide",
+  "checkpoint": "model_2000.pt",
+  "sha256": "8694cfaa5017daa1f5e3908800018203de0fdae2c8e4ef489e2ab3fc4459b9be",
+  "iteration": 2000,
+  "training_source_commit": "5c63dfd",
+  "actor": {
+    "input_dimension": 61,
+    "observations": [
+      "base_ang_vel",
+      "projected_gravity",
+      "commands",
+      "dof_pos_obs",
+      "dof_vel",
+      "dof_pos_target",
+      "oscillator_obs",
+      "foot_traction_obs"
+    ],
+    "hidden_dims": [
+      256,
+      256,
+      128
+    ],
+    "activation": "elu"
+  },
+  "critic": {
+    "input_dimension": 70,
+    "observations": [
+      "base_height",
+      "base_lin_vel",
+      "base_ang_vel",
+      "projected_gravity",
+      "commands",
+      "dof_pos_obs",
+      "dof_vel",
+      "dof_pos_target",
+      "oscillator_obs",
+      "oscillators_vel",
+      "foot_traction_obs",
+      "contact_friction_obs"
+    ],
+    "hidden_dims": [
+      256,
+      256,
+      128
+    ],
+    "activation": "elu"
+  },
+  "action_dimension": 12,
+  "action": "Residual joint-position targets with respect to the configured home posture",
+  "training": {
+    "seed": 0,
+    "num_envs": 4096,
+    "iterations": 2000,
+    "commands": {
+      "forward_boundary_probability": 0.0,
+      "forward_centers": [
+        -3.0,
+        -1.0,
+        0.0,
+        1.0,
+        3.0
+      ],
+      "forward_noise_std": 1.0,
+      "forward_uniform_range": [
+        0.5,
+        1.5
+      ],
+      "include_standing": true,
+      "ranges": {
+        "lin_vel_x": [
+          0.5,
+          1.5
+        ],
+        "lin_vel_y": 0.3,
+        "yaw_vel": 0.5
+      },
+      "resampling_time": 3.0
+    },
+    "control": {
+      "ctrl_dt": 0.01,
+      "ctrl_frequency": 100,
+      "damping": {
+        "hip": 0.5,
+        "thigh": 0.5,
+        "calf": 0.5
+      },
+      "decimation": 5,
+      "desired_sim_frequency": 500,
+      "stiffness": {
+        "hip": 20.0,
+        "thigh": 20.0,
+        "calf": 20.0
+      }
+    },
+    "oscillator": {
+      "coupling": true,
+      "coupling_moving": 1.0,
+      "coupling_noise_std": 0.25,
+      "coupling_stop": 4.0,
+      "directional_feedback_mode": "offset",
+      "directional_gain": 0.0,
+      "directional_min_load": 0.05,
+      "directional_min_progress": 0.5,
+      "directional_stance_gate": false,
+      "grf_threshold": 0.1,
+      "init_to": "random",
+      "init_w_offset": true,
+      "moving_frequency_scale": 1.0,
+      "observations": true,
+      "omega_max": 4.0,
+      "omega_noise_std": 0.25,
+      "omega_offset": 1.5,
+      "omega_stop": 1.0,
+      "process_noise_std": 0.25,
+      "push_gate_speed": 0.1,
+      "reward": true,
+      "stance_offset": 1.0,
+      "stop_threshold": 0.5,
+      "timeout_physical_reset_probability": 0.75,
+      "traction_ratio_limit": 2.0
+    },
+    "friction_range": [
+      0.1,
+      1.0
+    ],
+    "episode_length_s": 4.0,
+    "algorithm": {
+      "GAE_bootstrap_horizon": 2.0,
+      "batch_size": 16384,
+      "clip_param": 0.2,
+      "desired_kl": 0.01,
+      "discount_horizon": 1.0,
+      "entropy_coef": 0.02,
+      "gamma": 0.99,
+      "lam": 0.995,
+      "learning_rate": 1e-05,
+      "lr_range": [
+        1e-05,
+        0.01
+      ],
+      "lr_ratio": 1.5,
+      "max_grad_norm": 1.0,
+      "max_gradient_steps": 32,
+      "rollout_size": 131072,
+      "schedule": "adaptive",
+      "use_clipped_value_loss": true
+    },
+    "reward_weights": {
+      "action_rate": 0.01,
+      "action_rate2": 0.001,
+      "cursorial": 0.25,
+      "glide_drag": 5.0,
+      "min_base_height": 1.5,
+      "orientation": 1.0,
+      "push_load": 5.0,
+      "torques": 5e-07,
+      "tracking_ang_vel": 2.0,
+      "tracking_lin_vel": 4.0
+    }
+  }
+}

@@ -119,3 +119,64 @@ for what the retained tests cover.
 
 # Note on AI-generated files
 Some of the code has been worked on by an AI agent, in the case where code segments have been heavily edited by AI, the AI-generated files in [genAI_skills](genAI_skills/) may be of some value in understanding the code, especially [README_MUJOCO.md](genAI_skills/README_MUJOCO.md).
+
+# Go2 push/glide policy
+
+`go2osc_push_glide` trains a Go2 policy with decentralized push/glide phase
+oscillators in MuJoCo. The actor has 61 inputs, including eight signed
+tangential-to-normal foot-force ratios. The critic has 70 inputs, including
+the applied friction coefficient as privileged information.
+
+Training uses flat ground with friction sampled uniformly from `[0.1, 1.0]`
+per environment at startup. Moving forward commands are sampled uniformly
+from `[0.5, 1.5]` m/s, with standing and turning samples. Lateral and yaw
+commands are bounded by 0.3 m/s and 0.5 rad/s; commands resample every three
+seconds.
+
+## Train from scratch
+
+Run from the repository root with Python 3.11. GPU training requires a
+compatible NVIDIA driver and CUDA-capable GPU. The repository includes
+the Go2 physics asset.
+
+```sh
+uv sync --frozen --extra gpu
+uv run --frozen --extra gpu python scripts/train.py \
+    --task go2osc_push_glide --backend mujoco --device cuda:0 \
+    --num_envs 4096 --max_iterations 2000 --seed 0 \
+    --headless --disable_wandb
+```
+
+Checkpoints are saved under `logs/go2osc_push_glide/`. For a small CPU run,
+use `--device cpu --num_envs 16`; full training is intended for a GPU.
+
+## Play the included policy
+
+The trained checkpoint is [policies/go2osc_push_glide/model_2000.pt](policies/go2osc_push_glide/model_2000.pt).
+Its configuration and training metadata are recorded in
+[policy.json](policies/go2osc_push_glide/policy.json).
+Install the standard dependencies with `uv sync --frozen`, then run one of
+these commands from the repository root.
+
+macOS requires `mjpython` for the viewer:
+
+```sh
+uv run --frozen mjpython scripts/play.py \
+    --task go2osc_push_glide --backend mujoco --device cpu --num_envs 1 \
+    --experiment_name "$PWD/policies" --load_run go2osc_push_glide \
+    --checkpoint 2000 --seed 123
+```
+
+On Linux, use Python:
+
+```sh
+uv run --frozen python scripts/play.py \
+    --task go2osc_push_glide --backend mujoco --device cpu --num_envs 1 \
+    --experiment_name "$PWD/policies" --load_run go2osc_push_glide \
+    --checkpoint 2000 --seed 123
+```
+
+Playback starts at 1 m/s forward. Press **I/K** to adjust forward velocity,
+**J/L** for lateral velocity, **N/M** for yaw, **R** to reset, and **Esc** to
+quit. Releasing a key keeps the selected command. Playback samples friction
+from the policy's training range.
