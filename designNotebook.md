@@ -41,6 +41,11 @@ Engineering notebook to record the process of training, assumptions, edits, and 
 | 13 | `Nov15_20-06-14_` (seed 7263, random) | Run 12 + 10% pure turn-in-place commands | **Turning fixed**: 28/30, turn-in-place 0.11–0.28 rad/s, all turn cases pass; CoT at 1 m/s 0.74–1.24 (best yet). Slide good on μ ≤ 0.1 (like run 12) but **worse at μ ≥ 0.15**: decel 0.38–0.41 μg and 50% falls at μ = 0.2, v0 = 1.2. One seed only. |
 | 13b | `Nov15_20-55-40_` (seed 4939, random) | Run 13 repeated | Robustness suite 0/9 (falls at μ = 0.15–0.2 up to 75%); walking 19/30, turn-in-place fails on ground (0.54–0.58 rad/s). Confirms run 13's config makes the slide fragile and does not reliably fix turning. |
 | 14 | `Nov15_21-43-55_` (seed 8241, random) | Run 12 + 10% turn-in-place on ground only | **Failed**: robustness 0/9 (falls up to 75%), often no run-up on ice; walking 14/30, fails ordinary walking at μ 0.1–0.2 and doesn't turn on ice (≈1 rad/s error); ground turning 0.30–0.32. Reverted: `turn_in_place_probability` = 0. |
+| 15 | **`Nov15_21-34-07_est_finetune`** (seed 1; deployable) | Run 12 fine-tuned 500 it on task `go2_lowfric_est`: actor reads μ̂ from a concurrently trained estimator, friction switches on (p 0.3) | **First policy without privileged μ**: robustness 9/9 *as first scored; 2/9 after the slide-phase evaluation fix (Stage 2d)*, walking 29/30, switch eval 24/24, tracking error ~0.05 m/s. Slide decel 1.01 / 0.91 / 0.79 / 0.43 μg at μ 0.05 / 0.1 / 0.15 / 0.2 (weak at 0.2). μ̂ ≈ 0.1–0.2 on most surfaces: one cautious gait everywhere (Stage 2c). |
+| 16 | **`Nov15_22-14-34_est_continuous`** (seed 1; deployable) | Run 15 + 500 it with continuous friction (bins ice 0.05–0.2 / middle 0.2–0.6 / ground 0.6–1.2, weights 0.4 / 0.25 / 0.35) | **Middle friction fixed**: 2 m/s tracking at μ 0.3 / 0.5 0.43 / 0.46 → 0.16 / 0.13; sideways at mid μ better. μ̂ meaningful again (μ 0.8 → 0.93; ice → ground switches re-estimated). Walking 29/30, switches 24/24, robustness 8/9 as first scored, *3/9 after the evaluation fix (Stage 2d)*. **μ 0.2 braking not fixed** (0.45 μg): μ̂ is wrong *during* the slide (μ 0.1 → ~0.6). |
+| 17 | **`Nov15_22-56-19_est_latch`** (seed 1; deployable) | Run 16 + 500 it with μ̂ latched at slide start (`latch_in_slide`) | Robustness **7/9** (corrected eval; run 16: 3/9): μ 0.2 braking 0.39 → 0.54 μg, distance 2.99 → 1.93×; falls at μ 0.2 in `entry_speeds` (2/8) and `combined` (1/8). μ̂ at μ 0.2 during run-up 0.11 → 0.38–0.47. Walking 29/30, switches 24/24. |
+| 18a | **`Nov15_23-24-23_est_accel_latch`** (seed 1; **best deployable**) | Run 17 + 500 it; estimator gets the IMU accelerometer (widened with zero weights), latch on | **Robustness 9/9, no falls in any scenario** (first full pass under the corrected eval; teacher run 12: 8/9). Walking 29/30, switches 24/24, 2 m/s RMSE at μ 0.3 / 0.5 / 1: 0.09 / 0.14 / 0.10. μ̂ at μ 0.2 0.17–0.21 (run 17: 0.38–0.47). μ 0.2 braking still 0.37–0.65 μg (teacher 0.74). |
+| 18b | `Nov15_23-24-48_est_accel_nolatch` (seed 1) | As 18a, latch off | Robustness 3/9: falls at μ 0.2 (62% in *entry_speeds*, 38% *push*) and μ 0.15 nominal (1/8). μ̂ at μ 0.2 most accurate yet (0.24–0.26), but braking harder on it tips the robot. The latch stays. |
 
 ### Result figures
 
@@ -303,6 +308,96 @@ Each run keeps the same color in every figure. Data: `logs/eval/*.json`.
 
 **Repository state:** commit `3ace272` holds run 14's (rejected) config. The pending commit sets `turn_in_place_probability` back to 0, which restores run 12's training behavior exactly (the turn-in-place step returns before drawing any random numbers when off), plus the no-run-up metric. Evaluations of run 12 use `--original_cfg`, so they are unaffected either way.
 
+## Stage 2a: friction and velocity estimator (deployable μ)
+
+- *Why:* the actor reads the true μ, which no robot measures, so the policy is not deployable. Only the actor's μ must go; the critic and rewards may keep privileged information (training only).
+- *Built:* `learning/modules/history_estimator.py` (`ProprioHistory`, `HistoryStateEstimator`, `EstimatorInTheLoop`), `scripts/train_state_estimator.py`; `--state_estimator` in `evaluate_slide.py`, `evaluate_slide_robustness.py`, `evaluate_go2_friction.py`, `play.py` (overlay shows μ and μ̂).
+- *Estimator:* MLP (512-256-128) on a 0.5 s history (25 frames, every 2nd step) of IMU angular velocity, gravity direction, joint positions/velocities, previous joint targets, commands and the slide flag (1,150 inputs, true μ excluded). Outputs μ̂ and body velocity v̂ (x, y, z). Supervised MSE against simulator truth, trained online while the frozen run-12 policy drives the training mix; after 300 of 600 iterations half the envs act on μ̂ (DAgger-style) so the estimator also sees the policy's own estimate-driven states. 10 min on GPU. Saved to `logs/go2_lowfric/Nov15_19-11-13_/state_estimator/estimator.pt`.
+- *Validation* (fresh seed, policy on true μ):
+
+  | | μ̂ median rel. error | p90 | MAE |
+  |---|---|---|---|
+  | Ice, ≥ 1 s after reset | 14% | 47% | 0.022 |
+  | Ground, ≥ 1 s after reset | 3% | 8% | 0.032 |
+  | Ice, settling: 0–0.25 / 0.25–0.5 / 0.5–1 s | 45% / 17% / 12% | | |
+
+  v̂ RMSE: x 0.15, y 0.12, z 0.06 m/s (true spread 0.90 / 0.42 / 0.25).
+- *Policy on μ̂ (run 12, estimator in the loop):* slide robustness **7/9** (true μ: 8/9): nominal braking 0.78 μg and distance 1.33× (identical to true μ); one fall in 8 at μ 0.05 under *randomized* and 2/8 at μ 0.1 under *combined* (true μ: 1/8 there). Walking grid **24/30** (true μ: 25/30); turn-in-place on ice now passes, μ 0.8 turning and a μ 1 sideways case fail. Video: `logs/videos/stage1/run12_estimator_slide_mu0.1_v1.2.mp4`.
+- *Observation:* during the commanded slide maneuver μ̂ is compressed toward ~0.1–0.14 (μ 0.05 → 0.09–0.11, μ 0.2 → 0.13), far less accurate than in the training mix, likely because a held standing pose reveals little about friction and evaluations start from rest. The policy still slides almost identically, consistent with its tolerance of ±30% μ error: within the ice range it needs only "this is ice".
+- *Next (done in 2b):* friction patches (μ changing mid-episode) to train and test switching; optionally fine-tune the policy with μ̂ in the loop; feed v̂ to the actor if it helps on ice.
+
+## Stage 2b: friction switches (μ changes mid-episode)
+
+- *Why:* a deployed robot walks from carpet onto ice; μ̂ (and the gait) must switch on the new surface, not only after a reset.
+- *Built:* `friction_switch` config and `Go2LowFric` switching (one switch per episode to the other bin, at 2–8 s, never in slide episodes; off for policy training), `time_since_friction_change`; `scripts/evaluate_friction_switch.py` (start at rest, fixed command, μ jumps at 4 s; 6 transitions incl. 2 no-change controls × 4 commands × 4 replicas; falls, velocity RMSE before / first second after / adapted, μ̂ settling within 30%); `train_state_estimator.py --friction_switch_probability`; `--estimator_observe_only` (policy keeps true μ, μ̂ only recorded).
+- *Result 1, run 12 on true μ:* switches cost nothing: 0 falls, tracking after the switch like the controls; 19/24 graded, all 5 failures are `turn_left` yaw tracking (the known turn-in-place weakness, also in the controls).
+- *Problem: closed-loop fixed point.* With the stage-2a estimator in the loop: 0 falls, 19/24, but μ̂ barely moves after ice → ground (0.1 → 0.8: μ̂ 0.24 at 0.5 s, 0.3 at 2 s), and even with no switch at μ 0.8 μ̂ sat at 0.22–0.4 for slow/sideways/turn commands. Observe-only, the same estimator tracks every switch within 0.5 s (0.76–0.95 after ice → ground, 0.07–0.15 after ground → ice) and the controls are accurate. *Cause:* the policy changes its gait with the μ it is told, and the estimator partly reads the gait; a cautious "ice gait" on carpet does not slip, so a low μ̂ confirms itself. μ only shows through slip (the observability limit in the roadmap).
+- *Solution:* retrain the estimator with switches (probability 0.5) and more closed-loop data (DAgger from iteration 150, 75% of envs) → `state_estimator_switch/estimator.pt`. Validation: after a switch to ground 24% / 9% / 4% median error at 0–0.25 / 0.25–0.5 / 0.5–1 s; to ice 176% / 38% / 19%; settled ice 18% (stage 2a: 14%), ground 4%.
+- *Result 2, closed loop with the switch estimator:*
+
+  | | true μ | estimator 2a | **switch estimator** |
+  |---|---|---|---|
+  | Switch eval (graded) | 19/24 | 19/24 | **24/24** |
+  | Falls in switch eval | 0 | 0 | 0 |
+  | μ̂ 0.5 s after 0.05 → 1, forward | – | 0.23 | **0.99** |
+  | μ̂ 0.5 s after 1 → 0.05, forward | – | 0.53 | **0.13** |
+  | Walking grid | 25/30 | 24/30 | **28/30** |
+  | Slide robustness | 8/9 | 7/9 | 6/9 |
+
+  Ground → ice is re-estimated within 0.25–0.5 s for every command; ice → ground within 0.25–0.5 s while walking forward. Sideways and turn-in-place on new carpet stay "icy" (μ̂ ~0.2 for > 1 s, 0.45–0.6 at 2 s): the residual fixed point, harmless here (no falls, tracking passes).
+- *Slide trade-off:* nominal slide unchanged (0.78 μg, 1.36×). Failures: `entry_speeds` (1/8 never ran up at μ 0.05, v0 0.5; distance 1.70× at μ 0.2), `push` (1/8 falls at μ 0.1), `combined` (2/8 at μ 0.1, as with estimator 2a). Each is 1–2 robots of 8, near run-to-run noise, but consistent with the slightly worse ice accuracy.
+- *Observation:* an estimator trained for a frozen privileged policy hits a ceiling: the policy never learned to act on an imperfect μ̂, and the estimator can only learn from slip the policy chooses to cause. The usual fix is to adapt the policy to the estimate.
+- *Next (not started):* fine-tune run 12 with the switch estimator in the loop (policy reads μ̂, friction switches on during training), then re-run all three evaluations; optionally add a small "probe" incentive (or v̂ input) so slow gaits reveal μ.
+
+## Stage 2c: fine-tune the policy on μ̂ (deployable student, run 15)
+
+- *Why:* stage 2b showed an estimator trained around a frozen privileged policy hits a ceiling: the policy never learned to act on an imperfect μ̂ (closed-loop fixed point, extra slide falls).
+- *Built:* task `go2_lowfric_est` (`Go2LowFricEst`, `go2_lowfric_est_config.py`). The env runs the estimator every control step (`ConcurrentEstimator`) and publishes `contact_friction_hat` (clipped μ̂), which takes `contact_friction`'s slot in the actor input, so run 12's checkpoint loads unchanged; the critic, rewards, commands and physics keep the true μ. During PPO the estimator keeps training on true labels (256 random envs per step, 4 Adam steps every 24 steps, lr 3e-4), so it follows the changing policy; it starts from the stage-2b switch estimator. Friction switches on (p 0.3). `OnPolicyRunner` gained optional env hooks: `set_learning` (estimator trains only inside `learn()`), and `checkpoint_state` / `load_checkpoint_state` (estimator weights are stored inside every `model_*.pt`, so a checkpoint always replays with its own estimator; no `--state_estimator` needed, and passing one is refused).
+- *Run:* `uv run scripts/train.py --task go2_lowfric_est --resume --load_run Nov15_19-11-13_ --max_iterations 500 --seed 1 --device cuda:0 --headless` (local GPU, ~10 min) → `Nov15_21-34-07_est_finetune/model_2000.pt`. Reward 5.9 → 7.4 over the 500 iterations; mean episode time at the 10 s limit from ~iteration 12 on (the shorter early episodes come from the randomized starting episode counters).
+- *Result:*
+
+  | | run 12, true μ | run 12 + switch estimator | **run 15** |
+  |---|---|---|---|
+  | Slide robustness | 8/9 | 6/9 | **9/9** as first scored; **2/9** after the evaluation fix (Stage 2d) |
+  | Walking grid | 25/30 | 28/30 | **29/30** (only μ 0.05 at 2 m/s fails) |
+  | Switch eval | 19/24 | 24/24 | **24/24**, tracking ~0.05 m/s (was 0.1–0.3) |
+  | Slide decel μ 0.05 / 0.1 / 0.15 / 0.2 (μg) | 0.87 / 0.77 / 0.75 / 0.74 | – | **1.01 / 0.91 / 0.79 / 0.43** |
+  | 2 m/s tracking RMSE at μ 0.3 / 0.5 / 1 | 0.37 / 0.24 / 0.07 | 0.22 / 0.07 / 0.08 | 0.43 / 0.46 / 0.11 |
+
+  No falls in any slide scenario (push and combined included). Video: `logs/videos/stage1/run15_slide_mu0.1_v1.2.mp4`.
+- *Observation: one cautious gait.* μ̂ reads ≈ 0.1–0.2 on most surfaces, ground included (μ 0.8 → 0.13–0.27 for forward / turning; sideways walking is the exception, 0.6–0.9). The fine-tuned policy found a gait that works everywhere without knowing μ precisely; that gait rarely slips, so the estimator has little to read. Consequences: excellent tracking and robustness on ice and ground, but braking at μ 0.2 and fast running at intermediate μ (0.3–0.5) got worse, the regions where "assume ice" is wrong. μ̂ is no longer a trustworthy friction readout for this policy, only an internal signal.
+- *Run 16 (continuous friction, from run 15, 500 it):* adding a middle bin (0.2–0.6) fixed what "assume ice" broke at intermediate friction and restored μ̂ as a friction readout:
+
+  | | run 15 | **run 16** |
+  |---|---|---|
+  | 2 m/s tracking RMSE at μ 0.3 / 0.5 (m/s) | 0.43 / 0.46 | **0.16 / 0.13** |
+  | Sideways (0.5 m/s) RMSE at μ 0.3 / 0.5 | 0.18 / 0.19 | **0.11 / 0.09** |
+  | μ̂ 2 s after 0.1 → 0.8 (forward) / no switch at 0.8 (forward) | 0.17 / 0.14 | **0.75 / 0.93** |
+  | Walking grid / switch eval | 29/30, 24/24 | 29/30, 24/24 |
+  | Slide robustness (as first scored → after the Stage 2d fix) | 9/9 → 2/9 | 8/9 → 3/9 |
+  | Slide decel μ 0.05 / 0.1 / 0.15 / 0.2 (μg) | 1.01 / 0.91 / 0.79 / 0.43 | 0.98 / 0.96 / 0.74 / 0.45 |
+
+- *Remaining problem: μ̂ during the slide.* Median μ̂ over the slide trials: μ 0.1 → 0.56–0.61, μ 0.2 → 0.29–0.41 (run 16). In the residual-hold pose the feet barely move relative to the body, so the history carries little friction information (and the slide phase is a small share of training data). On μ ≤ 0.1 a stiff hold brakes at ~μg regardless; at μ 0.2 a stiff hold tips over (scripted hold: 88% falls), so the teacher (run 12) braked well there only because it was told μ. The student, not knowing, stops gently (0.45 μg) and never falls.
+- *Candidate fixes (not started):* (a) **latch μ̂ at slide start**: the surface does not change during a slide episode and μ̂ is accurate while running up on it, so hold the pre-slide estimate through the slide (estimator and actor input); (b) v̂ to the actor (deceleration is directly μg on all-feet sliding, so measured deceleration reveals μ); (c) more slide-phase weight in the estimator's training samples.
+- *Earlier next steps:* if braking at μ 0.2 or speed at intermediate friction matters, (a) longer fine-tuning or continuous μ (not two bins) so the middle range is trained, (b) feed v̂ (body speed) to the actor, (c) the same pipeline from scratch (estimator and policy trained together) as a comparison. Deployment: export actor + estimator together (both in `model_2000.pt`).
+
+## Stage 2d: evaluation fix and μ̂ latch in the slide (run 17)
+
+- *Evaluation bug (found while building the latch):* `evaluate_slide.py` and `play.py --slide` set `slide_phase` from outside, but `Go2LowFric._apply_slide_commands` zeroed it inside `step()` whenever the env was not running its own slide episode. The policy read the scripted phase (set after the step), but the in-env estimator of `go2_lowfric_est` read it inside the step, i.e. "not sliding" throughout every evaluated slide. Training was unaffected. Fix: `external_slide_phase` flag (scripts that drive the phase set it; the env then leaves the phase alone). The stage-2a/2b external estimator (`EstimatorInTheLoop`) read the phase correctly and is unaffected.
+- *Re-scored:* run 15 robustness 9/9 → **2/9**, run 16 8/9 → **3/9** (failures: stopping distance at μ 0.2, 2.2–3× ideal; one fall in 8 at μ 0.2 in *combined*). With the correct phase, μ̂ over the slide trials is compressed toward 0.1: μ 0.05 → 0.07–0.09, μ 0.2 → 0.11. The Stage 2c conclusions about walking, middle friction and switches stand (those evaluations never set the phase).
+- *Option 1, latch:* `state_estimator.latch_in_slide` holds the actor's μ̂ at its slide-start value until the slide phase ends (estimator keeps running and training underneath). On run 16's checkpoint without retraining it changed nothing (3/9): the latched value is ~0.11 at μ 0.2, because μ̂ was already ~0.11 during the run-up. *Cause:* running straight at ~1 m/s never needs more than ~μ 0.1, so the feet do not slip and μ 0.1 vs 0.2 is not observable from proprioception.
+- *Run 17 (run 16 + 500 it, latch on):* robustness **7/9**; μ 0.2 braking 0.54 μg (run 16: 0.39), distance 1.93× (2.99×); μ̂ at μ 0.2 rose to 0.38–0.47. Walking 29/30, switches 24/24. Likely mechanism: with the latch, only the run-up estimate matters for the slide, so policy and estimator, trained together, found a run-up that reveals friction better (now over-estimating μ 0.2 a little). New failures: falls at μ 0.2 in *entry_speeds* (2/8) and *combined* (1/8), where braking harder tips the robot (the teacher's known edge, cf. scripted hold 88% falls at μ 0.2).
+- *Next (not started):* add the IMU **accelerometer** (body linear acceleration, which a real Go2 IMU provides) to the estimator inputs. While all feet slide, deceleration = μg, so μ becomes directly observable *during* the slide, instead of inferred from a run-up; the latch could then be dropped. v̂ to the actor after that if still needed.
+
+## Stage 2e: IMU accelerometer for the estimator (runs 18a/18b)
+
+- *Why:* a Go2's IMU also measures linear acceleration, which the estimator did not use. While all feet slide, deceleration = μg, so μ becomes observable in the slide; the gait-based inputs could not separate μ 0.1 from 0.2.
+- *Built:* `Go2LowFric.base_lin_acc` (specific force = a − g in the body frame, units of g, finite difference of base velocity per physics step, restarted at resets); `DEFAULT_FEATURES` = `LEGACY_FEATURES` + `base_lin_acc`; `expand_estimator_inputs` widens a trained estimator with zero first-layer weights for new inputs (checked live on run 17: identical μ̂ to 6e-7), new inputs normalized on the first training batch; checkpoints now store `estimator_config` (older ones are read as `LEGACY_FEATURES`). Accelerometer has no sensor noise yet.
+- *Runs:* both from run 17, 500 it, trained in parallel: **18a** latch on, **18b** latch off (accelerometer replacing the latch).
+- *Result:* 18a passes all 9 slide scenarios with no falls, keeps walking 29/30 and switches 24/24; 18b falls at μ 0.2. In both, μ̂ at μ 0.2 moved toward the truth (0.17–0.26 vs 0.38–0.47 in run 17). With the latch the policy acts on the run-up estimate; without it, the more accurate in-slide μ̂ leads it to brake harder at μ 0.2, where a hard stance tips (the teacher's edge too).
+- *Caveats:* one seed each; 18a differs from run 17 by the accelerometer *and* 500 more iterations (no run 17 + 500 it control); μ 0.2 braking (0.37–0.69 μg) is still below the teacher's 0.74, it passes on the μ 0.05–0.2 averages.
+- *Next (not started):* control run (run 17 + 500 it, no accelerometer) and a second seed of 18a to attribute the gain; accelerometer noise for realism; then the slide range (μ ≤ 0.25–0.3) or torque (`tau_est`) as the next sensor.
+
 ## Roadmap
 
 Each stage changes one big thing (behavior → physics → structure), so results stay attributable.
@@ -329,12 +424,12 @@ Each stage changes one big thing (behavior → physics → structure), so result
      - unstable results across runs/seeds.
    - Compare against the stage 3 baseline on the same evaluations.
 
-**Deployable version (μ estimation)**, independent of stages 2–4. For real hardware, do this right after stage 1; if skating stays a simulation study, it can wait until after stage 4.
+**Deployable version (μ estimation)** — **best: run 18a (Stages 2a–2e)**, policy reads only μ̂; slide 9/9, walking 29/30, switches 24/24; independent of stages 2–4.
 - *Approach:* an explicit **neural-network state estimator** trained by supervised learning in simulation: input = a short history (~0.5 s) of what a real Go2 measures (joint positions/velocities, previous joint targets, IMU angular velocity and gravity direction, commands, slide flag); output = μ̂ (and base velocity v̂, which the actor also lacks); label = the true μ (and v) from the simulator. The run-12 policy then reads μ̂ instead of μ.
 - *Existing code:* `learning/algorithms/SE.py` (`StateEstimator`: MSE regression, rollout storage, export) and `learning/modules/state_estimator.py` (MLP) exist but are not wired into any runner yet; history inputs are new.
 - *Steps:* (1) record (history, μ, v) data with the frozen run-12 policy on randomized μ and train the estimator offline; check μ̂ accuracy by friction and how fast it settles; (2) run the policy on μ̂ through the existing evaluations (`--misreport_friction` already showed ±30% μ error is tolerated); (3) if the policy needs it, fine-tune or train jointly (estimator updated alongside PPO, policy sees μ̂ during training).
 - *Observability limit:* μ only shows when feet slip. On grippy ground the estimator can only say "μ is high enough", which is fine because the policy barely depends on μ there (Fig. 2).
-- *Friction patches:* train and test with μ changing mid-episode (ice → carpet → ice) so the estimate, and the gait, switch on contact with a new surface.
+- *Friction patches:* train and test with μ changing mid-episode (ice → carpet → ice) so the estimate, and the gait, switch on contact with a new surface. **Done (Stage 2b):** time-based switches; estimator retrained with switches re-estimates in 0.25–0.5 s; closed-loop fixed point for slow gaits remains.
 - *Alternatives (not chosen first):* teacher–student distillation of the whole policy (RMA-style latent instead of μ̂), or a recurrent policy with no explicit estimate. The explicit μ̂ keeps run 12 unchanged and is easy to inspect.
 
 **Other open items**

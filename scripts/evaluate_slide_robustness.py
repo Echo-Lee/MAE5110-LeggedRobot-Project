@@ -213,6 +213,12 @@ def main():
     parser.add_argument(
         "--scenarios", nargs="+", default=list(SCENARIOS), choices=list(SCENARIOS)
     )
+    parser.add_argument(
+        "--state_estimator",
+        type=Path,
+        default=None,
+        help="feed the policy mu-hat from this estimator instead of the true mu",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--regrade",
@@ -232,7 +238,9 @@ def main():
         "criteria": CRITERIA,
         "trained_max_friction": TRAINED_MAX_FRICTION,
         "sensor_noise": SENSOR_NOISE,
-        "arguments": vars(args) | {"output": str(args.output)},
+        "arguments": {
+            k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()
+        },
         "scenarios": {},
     }
     nominal_decel = None
@@ -267,6 +275,7 @@ def main():
                 seconds=seconds,
                 perturb=perturb,
                 seed=args.seed,
+                estimator_path=args.state_estimator,
             )
         finally:
             env._backend.close()

@@ -46,6 +46,17 @@ class Go2LowFricCfg(Go2Cfg):
         # reached 0.66-0.85 mu*g.
         slide_action_scale = 0.2
 
+    class friction_switch:
+        # Mid-episode surface change (Go2LowFric._apply_friction_switch): a
+        # fraction of episodes jump once to a friction drawn from another
+        # bin (e.g. ice -> ground), like stepping onto a patch.
+        # Slide episodes never switch (their command profile assumes one mu).
+        # Off for policy training: run 12 (stage 1) trained without it. The
+        # estimator trainer turns it on (--friction_switch_probability) and
+        # scripts/evaluate_friction_switch.py forces switches at fixed times.
+        probability = 0.0
+        time_range = [2.0, 8.0]  # s after reset, uniform
+
     class domain_randomization(Go2Cfg.domain_randomization):
         class startup(Go2Cfg.domain_randomization.startup):
             contact_friction_range = [ICE_FRICTION[0], GROUND_FRICTION[1]]

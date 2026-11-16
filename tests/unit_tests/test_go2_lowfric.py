@@ -445,3 +445,81 @@ def test_run_13_snapshots_without_the_limit_turn_everywhere(env):
     _set_friction(env, [0.05] * 8)
     env._resample_commands(torch.ones(8, dtype=torch.bool))
     assert (env.commands[:, :2] == 0).all()
+
+
+def test_friction_switch_is_off_by_default_for_policy_training():
+    assert Go2LowFricCfg.friction_switch.probability == 0.0
+
+
+def test_scheduled_friction_switch_changes_mu_at_its_time(env):
+    env.domain_randomizer._resample_contact_friction = False
+    _set_friction(env, [0.1] * 8)
+    env._reset_idx(torch.ones(8, dtype=torch.bool))
+    env.schedule_friction_switch(torch.arange(4), 0.5, 0.9)
+    _step_to(env, 0.4)
+    assert torch.allclose(env._backend.contact_friction, torch.tensor(0.1))
+    _step_to(env, 0.6)
+    friction = env._backend.contact_friction
+    assert torch.allclose(friction[:4], torch.tensor(0.9))
+    assert torch.allclose(friction[4:], torch.tensor(0.1))
+    # The policy's live friction view follows the physics.
+    torch.testing.assert_close(env.contact_friction[:, 0], friction)
+    assert (env.time_since_friction_change[:4] < 0.15).all()
+    assert (env.time_since_friction_change[4:] > 0.55).all()
+    assert torch.isinf(env.friction_switch_time).all()  # one switch only
+
+
+def test_sampled_switches_go_to_the_other_bin_and_skip_slides(env):
+    env.cfg.friction_switch.probability = 1.0
+    env.cfg.commands.slide_probability = 1.0
+    env.domain_randomizer._resample_contact_friction = False
+    _set_friction(env, [0.1] * 4 + [1.0] * 4)
+    env._reset_idx(torch.ones(8, dtype=torch.bool))
+    # Ice envs all became slide episodes: no switch for them.
+    assert env.slide_active[:4].all()
+    assert torch.isinf(env.friction_switch_time[:4]).all()
+    low, high = env.cfg.friction_switch.time_range
+    when = env.friction_switch_time[4:]
+    assert ((low <= when) & (when <= high)).all()
+    target = env.friction_switch_target[4:]
+    assert ((ICE_FRICTION[0] <= target) & (target <= ICE_FRICTION[1])).all()
+
+
+def test_switches_with_three_bins_always_leave_the_current_bin(env):
+    bins = [[0.05, 0.2], [0.2, 0.6], [0.6, 1.2]]
+    env.cfg.domain_randomization.startup.contact_friction_bins = bins
+    env.cfg.domain_randomization.startup.contact_friction_bin_weights = [1, 1, 1]
+    env.cfg.friction_switch.probability = 1.0
+    env.cfg.commands.slide_probability = 0.0
+    env.domain_randomizer._resample_contact_friction = False
+    for mu, (low, high) in ((0.1, bins[0]), (0.4, bins[1]), (1.0, bins[2])):
+        _set_friction(env, [mu] * 8)
+        targets = []
+        for _ in range(20):
+            env._reset_idx(torch.ones(8, dtype=torch.bool))
+            targets.append(env.friction_switch_target.clone())
+        targets = torch.cat(targets)
+        assert not ((low < targets) & (targets < high)).any()
+        assert ((0.05 <= targets) & (targets <= 1.2)).all()
+        if mu == 0.4:  # from the middle, both other bins are drawn
+            assert (targets <= 0.2).any() and (targets >= 0.6).any()
+
+
+def test_accelerometer_reads_one_g_up_when_standing(env):
+    for _ in range(50):
+        env.step()
+    reading = env.get_state("base_lin_acc")  # units of g
+    assert reading.shape == (8, 3)
+    torch.testing.assert_close(
+        reading.mean(dim=0), torch.tensor([0.0, 0.0, 1.0]), atol=0.15, rtol=0
+    )
+
+
+def test_accelerometer_restarts_at_reset(env):
+    env.root_states[:, 7] = 3.0  # as if a reset placed the base moving
+    env._backend.set_all_root_states()
+    env._reset_idx(torch.ones(8, dtype=torch.bool))
+    torch.testing.assert_close(
+        env._prev_world_lin_vel, env.root_states[:, 7:10].clone()
+    )
+    assert torch.allclose(env.get_state("base_lin_acc")[:, 2], torch.ones(8), atol=0.1)

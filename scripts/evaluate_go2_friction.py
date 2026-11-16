@@ -69,7 +69,7 @@ def check_case(result: dict, bounds: dict | None) -> dict:
 
 
 @torch.no_grad()
-def evaluate(env, runner, cases, *, replicas, seconds, warmup):
+def evaluate(env, runner, cases, *, replicas, seconds, warmup, estimator_path=None):
     num_envs = len(cases) * replicas
     frictions = torch.tensor(
         [friction for friction, _ in cases], device=env.device
@@ -82,6 +82,12 @@ def evaluate(env, runner, cases, *, replicas, seconds, warmup):
     )
     # Start every replica from the same reset distribution on its surface.
     env.reset()
+    estimator = None
+    if estimator_path is not None:
+        from learning.modules.history_estimator import EstimatorInTheLoop
+
+        # The policy reads mu-hat from this estimator, never the true mu.
+        estimator = EstimatorInTheLoop(env, estimator_path, env.device)
 
     feet = env.feet_indices
     joints = env.actuated_dof_indices
@@ -102,6 +108,8 @@ def evaluate(env, runner, cases, *, replicas, seconds, warmup):
     for _ in range(round(seconds / env.dt)):
         # Pin commands even when the task's periodic sampler fires.
         env.commands[:] = commands
+        if estimator is not None:
+            estimator.step()
         actions = runner.get_inference_actions()
         runner.set_actions(runner.actor_cfg["actions"], actions)
         env.step()
@@ -177,6 +185,12 @@ def main():
     parser.add_argument("--seconds", type=float, default=8.0)
     parser.add_argument("--warmup", type=float, default=2.0)
     parser.add_argument("--misreport_friction", type=float, default=None)
+    parser.add_argument(
+        "--state_estimator",
+        type=Path,
+        default=None,
+        help="feed the policy mu-hat from this estimator instead of the true mu",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
@@ -204,6 +218,10 @@ def main():
     if hasattr(env_cfg.commands, "slide_probability"):
         # Fixed commands are pinned below; no run-up-and-slide episodes.
         env_cfg.commands.slide_probability = 0.0
+    if hasattr(env_cfg, "friction_switch"):
+        # No random mid-episode friction switches (go2_lowfric_est trains
+        # with them); evaluate_friction_switch.py schedules its own.
+        env_cfg.friction_switch.probability = 0.0
     # Every replica starts at rest; the policy must build speed on its surface.
     env_cfg.init_state.root_vel_range = [[0.0, 0.0]] * 6
     apply_domain_randomization_override(env_cfg, "off")
@@ -228,6 +246,8 @@ def main():
         runner = task_registry.make_alg_runner(env, train_cfg)
         runner.load(path, load_optimizer=False)
         runner.switch_to_eval()
+        if args.misreport_friction is not None and args.state_estimator:
+            parser.error("use --misreport_friction or --state_estimator, not both")
         if args.misreport_friction is not None:
             if "contact_friction" not in runner.actor_cfg["obs"]:
                 parser.error("--misreport_friction needs a contact_friction policy")
@@ -243,6 +263,7 @@ def main():
             replicas=args.replicas,
             seconds=args.seconds,
             warmup=args.warmup,
+            estimator_path=args.state_estimator,
         )
     finally:
         env._backend.close()
@@ -257,7 +278,9 @@ def main():
             ["git", "rev-parse", "HEAD"], text=True
         ).strip(),
         "worktree": subprocess.check_output(["git", "status", "--short"], text=True),
-        "arguments": vars(args) | {"output": str(args.output)},
+        "arguments": {
+            k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()
+        },
         "env_config": class_to_dict(env_cfg),
         "runner_config": class_to_dict(train_cfg),
         "foot_order": list(env.robot_layout.body_groups["feet"]),

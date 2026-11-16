@@ -125,6 +125,13 @@ def get_play_args(argv=None):
         help="seconds the slide-phase observation stays on after the stop",
     )
     parser.add_argument(
+        "--state_estimator",
+        type=str,
+        default=None,
+        help="feed the policy mu-hat from this estimator instead of the true "
+        "mu (the deployable configuration)",
+    )
+    parser.add_argument(
         "--video",
         type=str,
         default=None,
@@ -192,6 +199,10 @@ def setup(args):
         # Playback drives commands itself (keyboard, --command, --slide); no
         # randomly chosen run-up-and-slide episodes.
         env_cfg.commands.slide_probability = 0.0
+    if hasattr(env_cfg, "friction_switch"):
+        # No random mid-episode friction switches (go2_lowfric_est trains
+        # with them); evaluate_friction_switch.py schedules its own.
+        env_cfg.friction_switch.probability = 0.0
     if hasattr(env_cfg, "viewer"):
         env_cfg.viewer.show_ui = args.viewer_ui
     if args.video:
@@ -271,6 +282,8 @@ def command_schedule(env, args):
     # Policies trained with the slide-phase observation see it set as in
     # training; older policies have no such input.
     observes_phase = hasattr(env, "slide_phase")
+    if observes_phase:
+        env.external_slide_phase = True  # scheduled below, not by the env
 
     def slide(step):
         time_s = torch.tensor(step * env.dt, device=env.device)
@@ -288,20 +301,24 @@ def command_schedule(env, args):
     return slide
 
 
-def play(env, runner, command_at):
+def play(env, runner, command_at, estimator=None):
     n_steps = 10 * int(env.max_episode_length)
     for step in range(n_steps):
+        if estimator is not None:
+            estimator.step()
         policy_step(env, runner, *command_at(step))
         env.check_exit()
 
 
-def record(env, runner, args, command_at):
+def record(env, runner, args, command_at, estimator=None):
     from gym.utils.interfaces.VideoRecorder import VideoRecorder
 
     os.makedirs(os.path.dirname(os.path.abspath(args.video)), exist_ok=True)
-    recorder = VideoRecorder(env, args.video, overlay=args.overlay)
+    recorder = VideoRecorder(env, args.video, overlay=args.overlay, estimator=estimator)
     try:
         for step in range(round(args.video_seconds / env.dt)):
+            if estimator is not None:
+                estimator.step()
             policy_step(env, runner, *command_at(step))
             recorder.capture(step)
     finally:
@@ -322,6 +339,11 @@ if __name__ == "__main__":
     with torch.no_grad():
         env, runner = setup(args)
         command_at = command_schedule(env, args)
+        estimator = None
+        if args.state_estimator:
+            from learning.modules.history_estimator import EstimatorInTheLoop
+
+            estimator = EstimatorInTheLoop(env, args.state_estimator, env.device)
         # The MuJoCo warp (GPU) backend is headless-only: render() is a no-op and
         # it has no passive viewer, so nothing draws.  Point the user at cpu.
         if (
@@ -377,6 +399,6 @@ if __name__ == "__main__":
 
                 CommandVisualizer(env)
         if args.video:
-            record(env, runner, args, command_at)
+            record(env, runner, args, command_at, estimator)
         else:
-            play(env, runner, command_at)
+            play(env, runner, command_at, estimator)

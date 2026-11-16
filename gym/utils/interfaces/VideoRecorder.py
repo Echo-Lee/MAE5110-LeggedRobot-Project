@@ -32,14 +32,18 @@ def frame_stride(dt: float, fps: float) -> int:
     return max(1, round(1.0 / (fps * dt)))
 
 
-def overlay_lines(time_s, friction, command, velocity) -> list[str]:
-    """Text rows: time and friction, then commanded and actual vx, vy, yaw."""
+def overlay_lines(time_s, friction, command, velocity, estimate=None) -> list[str]:
+    """Text rows: time and friction, then commanded and actual vx, vy, yaw.
+
+    ``estimate`` (mu-hat), when given, is shown next to the true friction.
+    """
 
     def row(name, v):
         return f"{name}  vx {v[0]:+5.2f}  vy {v[1]:+5.2f}  yaw {v[2]:+5.2f}"
 
     return [
-        f"t {time_s:5.2f} s    mu {friction:.3f}",
+        f"t {time_s:5.2f} s    mu {friction:.3f}"
+        + ("" if estimate is None else f"  (est {estimate:.3f})"),
         row("cmd", command),
         row("act", velocity),
     ]
@@ -75,7 +79,17 @@ class VideoRecorder:
     TRACKING_ELEVATION_DEG = -20.0
     TRACKING_AZIMUTH_DEG = 135.0
 
-    def __init__(self, env, path, *, fps=50.0, width=960, height=540, overlay=True):
+    def __init__(
+        self,
+        env,
+        path,
+        *,
+        fps=50.0,
+        width=960,
+        height=540,
+        overlay=True,
+        estimator=None,
+    ):
         backend = env._backend
         if not hasattr(backend, "_datas"):
             raise ValueError("--video needs the MuJoCo CPU backend (--device cpu)")
@@ -89,6 +103,7 @@ class VideoRecorder:
 
         self.env = env
         self.overlay = overlay
+        self.estimator = estimator  # EstimatorInTheLoop, shown as mu-hat
         self.stride = frame_stride(env.dt, fps)
         self.fps = 1.0 / (self.stride * env.dt)
         self._data = backend._datas[0]
@@ -149,6 +164,7 @@ class VideoRecorder:
                     env.base_lin_vel[0, 1].item(),
                     env.base_ang_vel[0, 2].item(),
                 ],
+                self._mu_hat(),
             )
             loads = env.contact_forces[0, env.feet_indices, 2]
             frame = draw_overlay(
@@ -156,6 +172,14 @@ class VideoRecorder:
             )
         self._ffmpeg.stdin.write(np.ascontiguousarray(frame).tobytes())
         self.frames += 1
+
+    def _mu_hat(self):
+        """mu-hat shown next to mu: an external estimator's, or the task's own
+        (as the policy reads it: clipped, latched in the slide if enabled)."""
+        if self.estimator is not None:
+            return self.estimator.mu_hat[0].item()
+        own = getattr(self.env, "contact_friction_hat", None)
+        return None if own is None else own[0, 0].item()
 
     def close(self) -> None:
         self._renderer.close()

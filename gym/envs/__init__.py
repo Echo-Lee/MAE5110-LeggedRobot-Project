@@ -21,6 +21,7 @@ class_dict = {
     "Go2": ".go2.go2",
     "Go2Trot": ".go2.go2trot",
     "Go2LowFric": ".go2.go2_lowfric",
+    "Go2LowFricEst": ".go2.go2_lowfric_est",
 }
 
 config_dict = {
@@ -38,6 +39,7 @@ config_dict = {
     "Go2Cfg": ".go2.go2_config",
     "Go2TrotCfg": ".go2.go2trot_config",
     "Go2LowFricCfg": ".go2.go2_lowfric_config",
+    "Go2LowFricEstCfg": ".go2.go2_lowfric_est_config",
 }
 
 runner_config_dict = {
@@ -55,6 +57,7 @@ runner_config_dict = {
     "Go2RunnerCfg": ".go2.go2_config",
     "Go2TrotRunnerCfg": ".go2.go2trot_config",
     "Go2LowFricRunnerCfg": ".go2.go2_lowfric_config",
+    "Go2LowFricEstRunnerCfg": ".go2.go2_lowfric_est_config",
 }
 
 task_dict = {
@@ -92,6 +95,11 @@ task_dict = {
     "go2": ["Go2", "Go2Cfg", "Go2RunnerCfg"],
     "go2trot": ["Go2Trot", "Go2TrotCfg", "Go2TrotRunnerCfg"],
     "go2_lowfric": ["Go2LowFric", "Go2LowFricCfg", "Go2LowFricRunnerCfg"],
+    "go2_lowfric_est": [
+        "Go2LowFricEst",
+        "Go2LowFricEstCfg",
+        "Go2LowFricEstRunnerCfg",
+    ],
 }
 
 

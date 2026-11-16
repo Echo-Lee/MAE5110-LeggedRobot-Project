@@ -112,6 +112,10 @@ def make_slide_env(
     if hasattr(env_cfg.commands, "slide_probability"):
         # The slide profile is pinned by the caller; no random episodes.
         env_cfg.commands.slide_probability = 0.0
+    if hasattr(env_cfg, "friction_switch"):
+        # No random mid-episode friction switches (go2_lowfric_est trains
+        # with them); evaluate_friction_switch.py schedules its own.
+        env_cfg.friction_switch.probability = 0.0
     if hasattr(env_cfg.commands, "turn_in_place_probability"):
         env_cfg.commands.turn_in_place_probability = 0.0
     env_cfg.init_state.root_vel_range = [[0.0, 0.0]] * 6
@@ -162,7 +166,14 @@ def evaluate(
     seconds,
     perturb=None,
     seed=0,
+    estimator_path=None,
 ):
+    """Run slide trials; with ``estimator_path`` the policy reads mu-hat.
+
+    mu-hat comes from a HistoryStateEstimator fed the same (possibly noisy)
+    sensor features a robot would have; the true mu is then never shown to
+    the policy, and friction_error perturbations do not apply.
+    """
     perturb = perturb or SlidePerturbations()
     generator = torch.Generator(device=env.device).manual_seed(seed)
     num_envs = len(cases) * replicas
@@ -187,8 +198,12 @@ def evaluate(
     env.reset()
 
     observes_phase = "slide_phase" in runner.actor_cfg["obs"]
+    if observes_phase:
+        # The loop below drives the phase; keep the env from zeroing it
+        # inside step() (an in-env estimator reads it there).
+        env.external_slide_phase = True
     observes_friction = "contact_friction" in runner.actor_cfg["obs"]
-    if perturb.friction_error and observes_friction:
+    if perturb.friction_error and observes_friction and estimator_path is None:
         error = perturb.friction_error
         told = frictions * (
             1.0
@@ -199,6 +214,21 @@ def evaluate(
         env.contact_friction = told.unsqueeze(1)
     if perturb.noise:
         noise_scale = runner.get_noise(runner.actor_cfg["obs"], perturb.noise)
+    if perturb.noise and hasattr(env, "contact_friction_hat"):
+        # Tasks with their own estimator (go2_lowfric_est): same sensor noise.
+        env.estimator_noise_std = runner.get_noise(
+            env.estimator_features, perturb.noise
+        )
+    estimator = None
+    if estimator_path is not None:
+        from learning.modules.history_estimator import EstimatorInTheLoop
+
+        estimator = EstimatorInTheLoop(env, estimator_path, env.device)
+        estimator_noise = (
+            runner.get_noise(estimator.features, perturb.noise)
+            if perturb.noise
+            else None
+        )
 
     feet = env.feet_indices
     joints = env.actuated_dof_indices
@@ -216,6 +246,7 @@ def evaluate(
         "pose_deviation",
     )
     records = {key: [] for key in keys}
+    mu_hat_records = []
     for step in range(round(seconds / env.dt)):
         time_s = torch.tensor(step * env.dt, device=env.device)
         forward = slide_speed_profile(time_s, speeds, frictions, runups)
@@ -235,6 +266,12 @@ def evaluate(
                 env.root_states[:, 7:9] += kick * due.unsqueeze(1)
                 env._backend.set_all_root_states()
                 pushed |= due
+        if estimator is not None:
+            estimator.step(estimator_noise, generator)
+            mu_hat_records.append(estimator.mu_hat.clone())
+        elif hasattr(env, "contact_friction_hat"):
+            # The policy's input (clipped, latched in the slide if enabled).
+            mu_hat_records.append(env.contact_friction_hat[:, 0].clone())
         observation = runner.get_obs(runner.actor_cfg["obs"])
         if perturb.noise:
             noise = noise_scale * torch.randn(
@@ -275,6 +312,12 @@ def evaluate(
             slide_start_step=starts[selection].tolist(),
             friction=friction,
         )
+        if mu_hat_records:
+            # mu-hat accuracy from 1 s on (after the history has filled).
+            mu_hat = torch.stack(mu_hat_records)[round(1.0 / env.dt) :, selection]
+            relative = ((mu_hat - friction).abs() / friction).flatten().cpu()
+            result["mu_hat_median"] = mu_hat.median().item()
+            result["mu_hat_median_rel_err"] = relative.median().item()
         results.append({"runup_command_m_s": speed} | result)
     return results
 
@@ -350,6 +393,12 @@ def main():
         help="seconds the slide-phase flag stays on after the stop (as trained)",
     )
     parser.add_argument("--replicas", type=int, default=8)
+    parser.add_argument(
+        "--state_estimator",
+        type=Path,
+        default=None,
+        help="feed the policy mu-hat from this estimator instead of the true mu",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if min(args.frictions) <= 0 or min(args.speeds) <= 0 or args.runup <= 0:
@@ -379,6 +428,7 @@ def main():
             hold_s=args.hold,
             seconds=seconds,
             seed=args.seed,
+            estimator_path=args.state_estimator,
         )
     finally:
         env._backend.close()
@@ -388,7 +438,9 @@ def main():
         "task": args.task,
         **checkpoint_metadata(path),
         "stop_speed_m_s": SLIDE_STOP_SPEED,
-        "arguments": vars(args) | {"output": str(args.output)},
+        "arguments": {
+            k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()
+        },
         "env_config": class_to_dict(env_cfg),
         "runner_config": class_to_dict(train_cfg),
         "cases": results,

@@ -7,6 +7,7 @@ from gym.utils.locomotion_metrics import (
     contact_point_velocity,
 )
 from gym.utils.sampling import masked_update
+from gym.utils.torch_quat import quat_rotate_inverse
 
 
 def slide_speed_profile(time_s, speed, friction, runup_s, decel_scale=1.0):
@@ -41,6 +42,15 @@ class Go2LowFric(Go2):
     def _init_buffers(self):
         super()._init_buffers()
         self.contact_friction = self._backend.contact_friction.unsqueeze(1)
+        # IMU accelerometer: specific force (acceleration minus gravity) in
+        # the body frame, as a real IMU reports it; (0, 0, g) standing still.
+        # Finite difference of the base velocity over one physics step.
+        # Read through get_state in units of g (scaling below); a sensor
+        # for state estimators, not a policy input.
+        self.scales.setdefault("base_lin_acc", GRAVITY_M_S2)
+        self._physics_dt = self.dt / self.cfg.control.decimation
+        self._prev_world_lin_vel = self.root_states[:, 7:10].clone()
+        self.base_lin_acc = self._at_rest_specific_force()
         num_feet = len(self.feet_indices)
         # Seconds each foot has been continuously loaded (0 while in the air)
         # and whether it touched down during the last control step.
@@ -58,6 +68,48 @@ class Go2LowFric(Go2):
         # Observation: 1 from the start of a slide until its post-stop hold
         # ends, else 0. On hardware this is part of the command ("slide now").
         self.slide_phase = torch.zeros(self.num_envs, 1, device=self.device)
+        # True when a script drives slide_phase itself (evaluate_slide.py,
+        # play.py --slide): the env then leaves it alone, so everything that
+        # reads it inside step() (the residual hold, an in-env estimator)
+        # sees the scripted phase instead of 0.
+        self.external_slide_phase = False
+        # Mid-episode friction switch: when (s after reset) and to what mu.
+        # inf = no switch pending. time_since_friction_change restarts at
+        # every reset and every switch (estimator settling is measured from it).
+        self.friction_switch_time = torch.full(
+            (self.num_envs,), float("inf"), device=self.device
+        )
+        self.friction_switch_target = torch.zeros(self.num_envs, device=self.device)
+        self.time_since_friction_change = torch.zeros(self.num_envs, device=self.device)
+        # Writing friction every step costs a per-env loop on the CPU
+        # backend, so switches are only checked when something can switch.
+        self._friction_switch_enabled = self._friction_switch_settings() is not None
+
+    def _friction_switch_settings(self):
+        """The friction_switch config if switching is on, else None.
+
+        Run snapshots that predate the option lack the section; they
+        trained without switches.
+        """
+        settings = getattr(self.cfg, "friction_switch", None)
+        if settings is None or settings.probability <= 0.0:
+            return None
+        return settings
+
+    def _at_rest_specific_force(self):
+        up = torch.zeros(self.num_envs, 3, device=self.device)
+        up[:, 2] = GRAVITY_M_S2
+        # root_states, not base_quat: right after a reset only the former
+        # holds the new orientation.
+        return quat_rotate_inverse(self.root_states[:, 3:7], up)
+
+    def _post_physics_step(self):
+        super()._post_physics_step()  # refreshes base_quat
+        world_vel = self.root_states[:, 7:10]
+        accel = (world_vel - self._prev_world_lin_vel) / self._physics_dt
+        accel[:, 2] += GRAVITY_M_S2  # specific force = a - g, g = (0, 0, -g)
+        self.base_lin_acc = quat_rotate_inverse(self.base_quat, accel)
+        self._prev_world_lin_vel = world_vel.clone()
 
     def _slide_settings(self):
         """The commands config if it defines slide episodes, else None.
@@ -98,10 +150,20 @@ class Go2LowFric(Go2):
         loaded = self.contact_forces[:, self.feet_indices, 2] > FOOT_LOAD_THRESHOLD_N
         self.foot_touchdown = loaded & (self.foot_contact_time == 0)
         self.foot_contact_time = (self.foot_contact_time + self.dt) * loaded
+        self._apply_friction_switch()
         self._apply_slide_commands()
 
     def _reset_idx(self, reset_mask):
         super()._reset_idx(reset_mask)  # resamples friction, then commands
+        # A reset teleports the base: restart the accelerometer's difference
+        # (out of place: these may be inference tensors after a PPO rollout).
+        mask = reset_mask.unsqueeze(1)
+        self._prev_world_lin_vel = torch.where(
+            mask, self.root_states[:, 7:10], self._prev_world_lin_vel
+        )
+        self.base_lin_acc = torch.where(
+            mask, self._at_rest_specific_force(), self.base_lin_acc
+        )
         masked_update(
             self.foot_contact_time, torch.zeros_like(self.foot_contact_time), reset_mask
         )
@@ -109,7 +171,76 @@ class Go2LowFric(Go2):
             self.foot_touchdown, torch.zeros_like(self.foot_touchdown), reset_mask
         )
         self._sample_slide_episodes(reset_mask)
+        self._sample_friction_switches(reset_mask)
+        self.time_since_friction_change.masked_fill_(reset_mask, 0.0)
         self._apply_slide_commands()
+
+    def _sample_friction_switches(self, reset_mask):
+        """Schedule a mid-episode switch to a different friction bin.
+
+        Each resetting env that is not a slide episode switches with
+        friction_switch.probability, at a time uniform in time_range, to a
+        mu uniform in another bin, chosen in proportion to the bin weights
+        (with two bins: always the other one).
+        """
+        settings = self._friction_switch_settings()
+        if settings is None:
+            return
+        startup = self.cfg.domain_randomization.startup
+        bins = startup.contact_friction_bins
+        if bins is None or len(bins) < 2:
+            raise ValueError("friction_switch needs at least two friction bins")
+        bounds = torch.tensor(bins, dtype=torch.float, device=self.device)
+        weights = torch.tensor(
+            startup.contact_friction_bin_weights or [1.0] * len(bins),
+            dtype=torch.float,
+            device=self.device,
+        )
+        friction = self._backend.contact_friction
+        # Bin of the current mu (bins are ordered; edges belong to the lower).
+        current = (friction.unsqueeze(1) > bounds[:, 1]).sum(dim=1)
+        current = current.clamp(max=len(bins) - 1)
+        others = weights.expand(self.num_envs, -1).clone()
+        others.scatter_(1, current.unsqueeze(1), 0.0)
+        target_bin = torch.multinomial(others, 1).squeeze(1)
+        rand = lambda: torch.rand(self.num_envs, device=self.device)  # noqa: E731
+        chosen = ~self.slide_active & (rand() < settings.probability)
+        low, high = settings.time_range
+        when = low + (high - low) * rand()
+        when = torch.where(chosen, when, torch.full_like(when, float("inf")))
+        lo, hi = bounds[target_bin, 0], bounds[target_bin, 1]
+        target = lo + (hi - lo) * rand()
+        masked_update(self.friction_switch_time, when, reset_mask)
+        masked_update(self.friction_switch_target, target, reset_mask)
+
+    def schedule_friction_switch(self, env_ids, time_s, friction):
+        """Force a switch (evaluation): env_ids change to ``friction`` at time_s."""
+        self.friction_switch_time[env_ids] = torch.as_tensor(
+            time_s, dtype=torch.float, device=self.device
+        )
+        self.friction_switch_target[env_ids] = torch.as_tensor(
+            friction, dtype=torch.float, device=self.device
+        )
+        self._friction_switch_enabled = True
+
+    def _apply_friction_switch(self):
+        """Apply due switches; keeps time_since_friction_change current.
+
+        One full masked write, like DomainRandomizer.randomize_episode, so no
+        GPU->host sync is needed to find the switching envs.
+        """
+        self.time_since_friction_change += self.dt
+        if not self._friction_switch_enabled:
+            return
+        time_s = self.episode_length_buf * self.dt
+        due = time_s >= self.friction_switch_time
+        current = self._backend.contact_friction
+        self._backend.set_contact_friction(
+            torch.arange(self.num_envs, device=self.device),
+            torch.where(due, self.friction_switch_target, current),
+        )
+        self.friction_switch_time.masked_fill_(due, float("inf"))
+        self.time_since_friction_change.masked_fill_(due, 0.0)
 
     def _resample_commands(self, command_mask):
         """Sample commands, then turn some of them into pure turn-in-place.
@@ -196,7 +327,8 @@ class Go2LowFric(Go2):
         torch.where(
             self.slide_active.unsqueeze(1), profile, self.commands, out=self.commands
         )
-        self.slide_phase[:, 0] = (self.slide_active & (time_s >= runup)).float()
+        if not self.external_slide_phase:
+            self.slide_phase[:, 0] = (self.slide_active & (time_s >= runup)).float()
 
     def _reward_slide_still(self):
         """Penalize joint motion during the slide phase (else 0).

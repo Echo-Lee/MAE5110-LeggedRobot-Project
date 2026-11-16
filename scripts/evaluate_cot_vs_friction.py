@@ -146,6 +146,10 @@ def main():
     if hasattr(env_cfg.commands, "slide_probability"):
         # Fixed commands are pinned below; no run-up-and-slide episodes.
         env_cfg.commands.slide_probability = 0.0
+    if hasattr(env_cfg, "friction_switch"):
+        # No random mid-episode friction switches (go2_lowfric_est trains
+        # with them); evaluate_friction_switch.py schedules its own.
+        env_cfg.friction_switch.probability = 0.0
     env_cfg.init_state.root_vel_range = [[0.0, 0.0]] * 6
     apply_domain_randomization_override(env_cfg, "off")
     env_cfg.domain_randomization.startup.contact_friction_range = [
