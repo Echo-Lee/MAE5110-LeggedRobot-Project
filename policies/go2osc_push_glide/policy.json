@@ -1,6 +1,7 @@
 {
   "task": "go2osc_push_glide",
   "checkpoint": "model_500.pt",
+  "configuration": "effective_config.json",
   "sha256": "5399c15a8e58d9a0e3a498e58813c508e8ce3db9ed9c52d6f0880fb03032adcf",
   "iteration": 500,
   "training_source_commit": "7f6ef5c836ff6f00c9fbf6b75e00eba9f64c2f2d",

@@ -180,3 +180,27 @@ Playback starts at 1 m/s forward. Press **I/K** to adjust forward velocity,
 **J/L** for lateral velocity, **N/M** for yaw, **R** to reset, and **Esc** to
 quit. Releasing a key keeps the selected command. Playback samples friction
 from the policy's training range.
+
+## Record acceleration and a zero-command stop
+
+Install `ffmpeg` (`brew install ffmpeg` on macOS or `sudo apt install ffmpeg`
+on Ubuntu). The recorder loads the included checkpoint and its saved
+configuration, fixes ground friction, starts from rest, and keeps the same
+policy active when the velocity command becomes zero.
+
+```sh
+uv run --frozen mjpython scripts/record_go2osc_stop.py \
+    --friction 0.05 --speed 2.5 --switch-time 14 --duration 26
+```
+
+On Linux, replace `mjpython` with `python`. On a Linux machine without a
+display, set `MUJOCO_GL=egl` before the command. The video and its JSON and
+NumPy motion records are saved under `artifacts/go2osc/command_stop.*`.
+Use `--output artifacts/go2osc/my_stop.mp4` to choose another filename, or
+`--no-video` to save motion data without rendering or requiring `ffmpeg`.
+
+`--speed` specifies the commanded forward velocity; the overlay also shows
+the measured speed. Friction 0.05 and a 2.5 m/s command are outside this
+checkpoint's training ranges. No controller or reward changes are applied
+during recording. For a gradual command increase, add
+`--ramp-start-speed 1.5 --ramp-start-time 6 --ramp-end-time 12`.
