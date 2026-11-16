@@ -36,6 +36,7 @@ from .my_runner import MyRunner
 from .off_policy_runner import OffPolicyRunner
 from .old_policy_runner import OldPolicyRunner
 from .on_policy_runner import OnPolicyRunner
+from .oscillator_runner import OscillatorRunner
 from .psd_sac_runner import PSACRunner
 
 RUNNER_CLASSES = {
@@ -47,6 +48,7 @@ RUNNER_CLASSES = {
         OffPolicyRunner,
         OldPolicyRunner,
         OnPolicyRunner,
+        OscillatorRunner,
         PSACRunner,
     )
 }
@@ -67,6 +69,7 @@ __all__ = [
     "OffPolicyRunner",
     "OldPolicyRunner",
     "OnPolicyRunner",
+    "OscillatorRunner",
     "PSACRunner",
     "RUNNER_CLASSES",
     "get_runner_class",
