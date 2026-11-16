@@ -356,8 +356,9 @@ class Go2OscPushGlideCfg(Go2OscORC111GRFDirectionalCfg):
         push_load_cap = 0.5
         # -sin(phase) at which the push weight reaches 1; 1.0 is a plain sine.
         push_window_saturation = 0.5
-        # Gaussian turning reward sized for the 0.5 rad/s command range.
-        yaw_tracking_tolerance = 0.5
+        # Width of the Gaussian turning reward [rad/s]: half the command range,
+        # so a small steady yaw-rate error is not free.
+        yaw_tracking_tolerance = 0.25
         # Most that tilt_rate charges per step [rad^2/s^2]; 4 is 2 rad/s.
         tilt_rate_cap = 4.0
 

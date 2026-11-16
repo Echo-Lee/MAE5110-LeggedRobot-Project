@@ -566,6 +566,7 @@ def test_push_glide_variant_changes_only_declared_signals_inputs_and_rewards():
     assert variant["osc"].pop("sideways_stop_threshold") == 0.1
     assert variant["osc"].pop("turning_stop_threshold") == 0.1
     assert variant["reward_settings"].pop("tilt_rate_cap") == 4.0
+    assert variant["control"].pop("action_limit") == 10.0
     assert variant["scaling"].pop("foot_traction_obs") == 1.0
     assert variant["scaling"].pop("contact_friction_obs") == 1.0
     assert variant["commands"]["forward_uniform_range"] == [0.0, 1.5]
@@ -581,7 +582,7 @@ def test_push_glide_variant_changes_only_declared_signals_inputs_and_rewards():
     assert variant["reward_settings"].pop("push_load_cap") == 0.5
     assert variant["reward_settings"].pop("push_window_saturation") == 0.5
     assert baseline["reward_settings"]["yaw_tracking_tolerance"] is None
-    assert variant["reward_settings"]["yaw_tracking_tolerance"] == 0.5
+    assert variant["reward_settings"]["yaw_tracking_tolerance"] == 0.25
     variant["reward_settings"]["yaw_tracking_tolerance"] = None
     assert variant == baseline
 
