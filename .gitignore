@@ -102,4 +102,4 @@ pendulum_rollout.png
 notebooks/__marimo__/
 
 # Published Go2 oscillator policy
-!policies/go2osc_push_glide/model_2000.pt
+!policies/go2osc_push_glide/model_500.pt

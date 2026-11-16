@@ -1,9 +1,9 @@
 {
   "task": "go2osc_push_glide",
-  "checkpoint": "model_2000.pt",
-  "sha256": "8694cfaa5017daa1f5e3908800018203de0fdae2c8e4ef489e2ab3fc4459b9be",
-  "iteration": 2000,
-  "training_source_commit": "5c63dfd",
+  "checkpoint": "model_500.pt",
+  "sha256": "5399c15a8e58d9a0e3a498e58813c508e8ce3db9ed9c52d6f0880fb03032adcf",
+  "iteration": 500,
+  "training_source_commit": "7f6ef5c836ff6f00c9fbf6b75e00eba9f64c2f2d",
   "actor": {
     "input_dimension": 61,
     "observations": [
@@ -51,7 +51,7 @@
   "training": {
     "seed": 0,
     "num_envs": 4096,
-    "iterations": 2000,
+    "iterations": 500,
     "commands": {
       "forward_boundary_probability": 0.0,
       "forward_centers": [
@@ -63,13 +63,13 @@
       ],
       "forward_noise_std": 1.0,
       "forward_uniform_range": [
-        0.5,
+        0.0,
         1.5
       ],
       "include_standing": true,
       "ranges": {
         "lin_vel_x": [
-          0.5,
+          0.0,
           1.5
         ],
         "lin_vel_y": 0.3,
@@ -116,7 +116,7 @@
       "push_gate_speed": 0.1,
       "reward": true,
       "stance_offset": 1.0,
-      "stop_threshold": 0.5,
+      "stop_threshold": 0.2,
       "timeout_physical_reset_probability": 0.75,
       "traction_ratio_limit": 2.0
     },
@@ -151,12 +151,52 @@
       "action_rate2": 0.001,
       "cursorial": 0.25,
       "glide_drag": 5.0,
+      "lin_vel_z": 2.0,
       "min_base_height": 1.5,
       "orientation": 1.0,
       "push_load": 5.0,
       "torques": 5e-07,
       "tracking_ang_vel": 2.0,
       "tracking_lin_vel": 4.0
+    },
+    "reward_settings": {
+      "base_height_target": 0.4,
+      "foot_clearance_height_reference": 0.01,
+      "max_contact_force": 600.0,
+      "mechanical_power_reference_speed": 1.0,
+      "push_load_cap": 0.5,
+      "push_window_saturation": 0.5,
+      "sliding_body_match_width": null,
+      "sliding_clearance_reference": 0.001,
+      "sliding_contact_age_mode": "force",
+      "sliding_contact_initial_fraction": 0.0,
+      "sliding_contact_ramp_duration": 0.02,
+      "sliding_engagement_max_clearance": 0.001,
+      "sliding_engagement_max_gap": 0.01,
+      "sliding_engagement_min_load": 0.05,
+      "sliding_engagement_min_speed": 0.05,
+      "sliding_lateral_speed_reference": 0.1,
+      "sliding_speed_deadzone": 0.0,
+      "sliding_speed_reference": 0.2,
+      "sliding_speed_reward": "saturated",
+      "sliding_tracking_width": 0.3,
+      "sliding_vertical_speed_reference": 0.05,
+      "soft_dof_pos_limit": 0.9,
+      "soft_dof_vel_limit": 0.9,
+      "soft_support_load_reference": 0.05,
+      "soft_torque_limit": 0.9,
+      "stance_foot_vertical_speed_reference": 0.1,
+      "stance_force_sliding_epsilon": 0.0001,
+      "stance_force_sliding_gain": 0.0,
+      "stance_force_sliding_min_load": 0.05,
+      "stance_force_sliding_ratio_reference": 0.2,
+      "sustained_support_duration": 0.1,
+      "touchdown_vertical_speed_reference": 0.1,
+      "tracking_sigma": 0.25,
+      "velocity_tracking_reference_speed": 1.0,
+      "velocity_tracking_reward": "gaussian",
+      "velocity_tracking_tolerance": null,
+      "yaw_tracking_tolerance": 0.5
     }
   }
 }

@@ -1340,6 +1340,16 @@ class Go2OscPushGlide(Go2OscDirectional):
             raise ValueError(
                 "directional_gain must be 0: the push signal replaces angle feedback"
             )
+        # Configurations saved before these fields existed keep the plain sine.
+        for name in ("push_load_cap", "push_window_saturation"):
+            value = getattr(cfg.reward_settings, name, 1.0)
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or not 0.0 < value <= 1.0
+            ):
+                raise ValueError(f"{name} must be finite and in (0, 1]")
 
     def _init_buffers(self):
         super()._init_buffers()
@@ -1385,10 +1395,14 @@ class Go2OscPushGlide(Go2OscDirectional):
         along = (relative * direction.unsqueeze(1)).sum(dim=-1)
         return torch.sigmoid(-along / self.cfg.osc.push_gate_speed)
 
+    def _gated(self, load):
+        """Apply the foot-motion gate when moving; pass the load through otherwise."""
+        return torch.where(self._moving(), load * self._compute_push_gate(), load)
+
     def _compute_push_signal(self):
         """Gated normal load when moving; plain normal load otherwise."""
         normal, _ = self._foot_loads()
-        return torch.where(self._moving(), normal * self._compute_push_gate(), normal)
+        return self._gated(normal)
 
     def _compute_oscillator_drift(self):
         """Equation (4) with the push signal in place of force magnitude."""
@@ -1398,9 +1412,20 @@ class Go2OscPushGlide(Go2OscDirectional):
         return self.osc_omega - self._compute_push_signal() * local_feedback
 
     def _reward_push_load(self):
-        """Push half: reward load on feet that are stroking, not on carried feet."""
-        phase = (-torch.sin(self.oscillators)).clamp(min=0.0)
-        return (phase * self._compute_push_signal()).sum(dim=1)
+        """Push half: reward load on stroking feet, up to a per-foot cap.
+
+        Credit stops at push_load_cap body weights, and the phase weight
+        saturates once -sin(phase) reaches push_window_saturation, so a short
+        hard burst earns no more than steady support through the push half.
+        Both default to 1, which is the plain sine-weighted load. Oscillator
+        feedback keeps the uncapped signal.
+        """
+        settings = self.cfg.reward_settings
+        cap = getattr(settings, "push_load_cap", 1.0)
+        saturation = getattr(settings, "push_window_saturation", 1.0)
+        phase = (-torch.sin(self.oscillators) / saturation).clamp(min=0.0, max=1.0)
+        normal, _ = self._foot_loads()
+        return (phase * self._gated(normal.clamp(max=cap))).sum(dim=1)
 
     def _reward_glide_drag(self):
         """Glide half: penalize tangential force when moving, else normal load.

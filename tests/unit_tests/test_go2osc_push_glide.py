@@ -114,7 +114,7 @@ def test_rigid_base_rotation_and_translation_leave_the_gate_neutral():
     torch.testing.assert_close(env._compute_push_gate(), torch.full((1, 4), 0.5))
 
 
-@pytest.mark.parametrize("command", [[0, 0, 0], [0.5, 0, 0], [-0.5, 2, 1], [0, 3, 0]])
+@pytest.mark.parametrize("command", [[0, 0, 0], [0.2, 0, 0], [-0.2, 2, 1], [0, 3, 0]])
 def test_slow_branch_feeds_back_plain_normal_load(command):
     env = _env()
     env.commands[:] = torch.tensor(command, dtype=torch.float)
@@ -221,8 +221,74 @@ def test_zero_coupling_and_unloaded_feet_reduce_to_a_clock():
     )
 
 
-def test_push_reward_weights_gated_load_by_the_push_half_of_the_phase():
+def _trot_and_burst(env):
+    """One cycle sampled across environments; both gaits carry one body weight.
+
+    The trot holds 0.5 body weights on each foot through its push half. The
+    burst puts 1 body weight on every foot for a quarter cycle at mid-push.
+    """
+    count = env.num_envs
+    cycle = torch.arange(count) * (2 * math.pi / count)
+    env.root_states[:, 7] = 1.0
+    trot_phase = torch.stack((cycle, cycle + math.pi, cycle + math.pi, cycle), dim=1)
+    trot_load = 0.5 * (trot_phase.sin() < 0)
+    burst_phase = cycle.unsqueeze(1).expand(-1, 4)
+    burst_load = 1.0 * ((burst_phase - 1.5 * math.pi).abs() < math.pi / 4)
+    scores = []
+    for phase, load in ((trot_phase, trot_load), (burst_phase, burst_load)):
+        assert abs(load.sum(dim=1).mean().item() - 1.0) < 0.01
+        env.oscillators.copy_(phase.remainder(2 * math.pi))
+        env.contact_forces[:, env.feet_indices, 2] = load * WEIGHT
+        scores.append(env._reward_push_load().mean().item())
+    return scores
+
+
+def test_capped_flat_push_reward_prefers_steady_support_to_a_burst():
+    env = _env(720)
+    trot, burst = _trot_and_burst(env)
+    assert trot > burst + 0.25
+    # Flat-topped window over the push half; the capped burst earns 4 * 0.5 / 4.
+    assert abs(trot - 0.837) < 0.01 and abs(burst - 0.5) < 0.01
+    env.cfg.reward_settings.push_load_cap = 1.0
+    env.cfg.reward_settings.push_window_saturation = 1.0
+    trot, burst = _trot_and_burst(env)
+    # The plain sine pays the burst 0.90 against 2 / pi for the trot.
+    assert burst > trot + 0.2
+    assert abs(trot - 2 / math.pi) < 0.01 and abs(burst - 0.9) < 0.01
+
+
+def test_push_credit_stops_at_the_cap_while_feedback_keeps_the_full_load():
     env = _env()
+    env.root_states[:, 7] = 1.0
+    env.oscillators.fill_(1.5 * math.pi)
+    env.contact_forces[:, env.feet_indices, 2] = (
+        torch.tensor([0.2, 0.5, 0.8, 1.6]) * WEIGHT
+    )
+    gate = _gate(-1.0)
+    torch.testing.assert_close(env._reward_push_load(), torch.tensor([1.7 * gate]))
+    signal = torch.tensor([[0.2, 0.5, 0.8, 1.0]]) * gate
+    torch.testing.assert_close(env._compute_push_signal(), signal)
+    drift = env._compute_oscillator_drift().clone()
+    env.cfg.reward_settings.push_load_cap = 0.3
+    torch.testing.assert_close(env._reward_push_load(), torch.tensor([1.1 * gate]))
+    torch.testing.assert_close(env._compute_oscillator_drift(), drift, rtol=0, atol=0)
+
+
+def test_push_window_is_flat_between_thirty_degree_ramps():
+    env = _env(2)
+    env.root_states[:, 7] = 1.0
+    degrees = torch.tensor([[180.0, 195, 210, 240], [270, 330, 345, 90]])
+    env.oscillators[:] = degrees * math.pi / 180
+    ramp = math.sin(math.radians(15)) / 0.5
+    weights = torch.tensor([[0.0, ramp, 1.0, 1.0], [1.0, 1.0, ramp, 0.0]])
+    expected = (weights * 0.25 * _gate(-1.0)).sum(dim=1)
+    torch.testing.assert_close(env._reward_push_load(), expected, atol=1e-6, rtol=1e-5)
+
+
+def test_unit_cap_and_saturation_give_the_plain_sine_weighted_push_reward():
+    env = _env()
+    env.cfg.reward_settings.push_load_cap = 1.0
+    env.cfg.reward_settings.push_window_saturation = 1.0
     env.root_states[:, 7] = 1.0
     _set_foot_velocities(env, [[0, 0, 0], [0, 0, 0], [0, 0, 0], [1, 0, 0]])
     env.oscillators[:] = torch.tensor(
@@ -230,6 +296,9 @@ def test_push_reward_weights_gated_load_by_the_push_half_of_the_phase():
     )
     stroking = 0.25 * _gate(-1.0)
     expected = 1.0 * stroking + 0.0 + 0.5 * stroking + 1.0 * 0.125
+    torch.testing.assert_close(env._reward_push_load(), torch.tensor([expected]))
+    # A configuration saved before the fields existed scores the same.
+    env.cfg.reward_settings = SimpleNamespace()
     torch.testing.assert_close(env._reward_push_load(), torch.tensor([expected]))
 
 
@@ -259,7 +328,7 @@ def test_glide_cost_applies_only_in_the_glide_half_of_the_phase():
     )
 
 
-@pytest.mark.parametrize("command", [[0, 0, 0], [0.5, 0, 0], [-0.3, 1, 0]])
+@pytest.mark.parametrize("command", [[0, 0, 0], [0.2, 0, 0], [-0.1, 1, 0]])
 def test_slow_branch_glide_cost_is_the_original_normal_load_penalty(command):
     env = _env()
     env.commands[:] = torch.tensor(command, dtype=torch.float)
@@ -339,6 +408,25 @@ def test_invalid_push_glide_configuration_fails_before_simulation(field, value):
         Go2OscPushGlide._validate_push_glide_cfg(cfg)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("push_load_cap", 0.0),
+        ("push_load_cap", 1.5),
+        ("push_load_cap", float("nan")),
+        ("push_window_saturation", 0.0),
+        ("push_window_saturation", -0.5),
+        ("push_window_saturation", 2.0),
+        ("push_window_saturation", float("inf")),
+    ],
+)
+def test_invalid_push_reward_shape_fails_before_simulation(field, value):
+    cfg = configs.Go2OscPushGlideCfg()
+    setattr(cfg.reward_settings, field, value)
+    with pytest.raises(ValueError, match=field):
+        Go2OscPushGlide._validate_push_glide_cfg(cfg)
+
+
 def test_push_glide_variant_changes_only_declared_signals_inputs_and_rewards():
     baseline = class_to_dict(configs.Go2OscORC111GRFDirectionalCfg())
     variant = class_to_dict(configs.Go2OscPushGlideCfg())
@@ -347,18 +435,26 @@ def test_push_glide_variant_changes_only_declared_signals_inputs_and_rewards():
     variant["osc"]["directional_gain"] = 1.0
     assert variant["osc"].pop("push_gate_speed") == GATE_SPEED
     assert variant["osc"].pop("traction_ratio_limit") == 2.0
+    assert baseline["osc"]["stop_threshold"] == 0.5
+    assert variant["osc"]["stop_threshold"] == 0.2
+    variant["osc"]["stop_threshold"] = 0.5
     assert variant["scaling"].pop("foot_traction_obs") == 1.0
     assert variant["scaling"].pop("contact_friction_obs") == 1.0
-    assert variant["commands"]["forward_uniform_range"] == [0.5, 1.5]
+    assert variant["commands"]["forward_uniform_range"] == [0.0, 1.5]
     variant["commands"]["forward_uniform_range"] = None
     assert variant["commands"]["include_standing"] is True
     for key, value in {
-        "lin_vel_x": [0.5, 1.5],
+        "lin_vel_x": [0.0, 1.5],
         "lin_vel_y": 0.3,
         "yaw_vel": 0.5,
     }.items():
         assert variant["commands"]["ranges"][key] == value
         variant["commands"]["ranges"][key] = baseline["commands"]["ranges"][key]
+    assert variant["reward_settings"].pop("push_load_cap") == 0.5
+    assert variant["reward_settings"].pop("push_window_saturation") == 0.5
+    assert baseline["reward_settings"]["yaw_tracking_tolerance"] is None
+    assert variant["reward_settings"]["yaw_tracking_tolerance"] == 0.5
+    variant["reward_settings"]["yaw_tracking_tolerance"] = None
     assert variant == baseline
 
     baseline = class_to_dict(configs.Go2OscORC111GRFDirectionalRunnerCfg())
@@ -377,6 +473,9 @@ def test_push_glide_variant_changes_only_declared_signals_inputs_and_rewards():
     assert weights.pop("push_load") == 5.0 and weights.pop("glide_drag") == 5.0
     assert weights["swing_grf"] == 0.0 and weights["stance_grf"] == 0.0
     weights["swing_grf"] = weights["stance_grf"] = 5.0
+    assert baseline["critic"]["reward"]["weights"]["lin_vel_z"] == 0.0
+    assert weights["lin_vel_z"] == 2.0
+    weights["lin_vel_z"] = 0.0
     assert variant == baseline
 
 
@@ -408,7 +507,7 @@ def test_command_ranges_stay_within_the_grip_of_the_lowest_friction():
     assert cfg.commands.include_standing is True
 
 
-def test_sampled_commands_mix_standing_turning_and_bounded_steering():
+def test_sampled_commands_cover_slow_walking_standing_and_bounded_steering():
     env, _, backend = _make_cpu_env(num_envs=128)
     try:
         everyone = torch.ones(128, dtype=torch.bool)
@@ -418,20 +517,22 @@ def test_sampled_commands_mix_standing_turning_and_bounded_steering():
             samples.append(env.commands.clone())
         forward, sideways, turning = torch.cat(samples).unbind(dim=1)
         halted = forward == 0
-        assert torch.all(halted | ((forward >= 0.5) & (forward <= 1.5)))
+        assert torch.all((forward >= 0.0) & (forward <= 1.5))
         assert torch.all(sideways.abs() <= 0.3) and torch.all(turning.abs() <= 0.5)
         assert sideways.abs().max() > 0.28 and turning.abs().max() > 0.47
         # The forward command is only ever dropped together with the sideways one.
         assert torch.count_nonzero(sideways[halted]) == 0
-        moving = forward.abs() > env.cfg.osc.stop_threshold
-        assert torch.equal(moving, ~halted)
+        threshold = env.cfg.osc.stop_threshold
+        assert threshold == 0.2
+        moving = forward.abs() > threshold
         steering = (sideways != 0) | (turning != 0)
-        # Dropout probabilities 0.2, 0.2 and 0.1 leave these four command kinds.
+        # Dropout probabilities 0.2, 0.2 and 0.1 keep 72% of uniform 0-1.5 draws.
         expected = {
             "standing": (halted & ~steering, 0.136),
             "turning in place": (halted & steering, 0.144),
-            "straight ahead": (moving & ~steering, 0.144),
-            "steered": (moving & steering, 0.576),
+            "below the stop threshold": (~halted & ~moving, 0.72 * 0.2 / 1.5),
+            "moving": (moving, 0.72 * 1.3 / 1.5),
+            "formerly untrained 0.2-0.5 m/s": (moving & (forward < 0.5), 0.144),
         }
         for name, (selected, share) in expected.items():
             assert abs(selected.float().mean().item() - share) < 0.025, name

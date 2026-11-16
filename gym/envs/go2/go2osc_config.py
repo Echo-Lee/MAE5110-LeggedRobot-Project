@@ -319,12 +319,13 @@ class Go2OscPushGlideCfg(Go2OscORC111GRFDirectionalCfg):
     """Push/glide phase signals for mixed-friction training."""
 
     class commands(Go2OscORC111GRFDirectionalCfg.commands):
-        forward_uniform_range = [0.5, 1.5]
+        # Continuous from rest, so no speed near the stop threshold is untrained.
+        forward_uniform_range = [0.0, 1.5]
         # Standing dropout also yields straight and turn-in-place commands.
         include_standing = True
 
         class ranges(Go2OscORC111GRFDirectionalCfg.commands.ranges):
-            lin_vel_x = [0.5, 1.5]
+            lin_vel_x = [0.0, 1.5]
             # Steering that friction 0.1 can still hold at 1.5 m/s forward.
             lin_vel_y = 0.3  # max [m/s]
             yaw_vel = 0.5  # max [rad/s]
@@ -339,6 +340,16 @@ class Go2OscPushGlideCfg(Go2OscORC111GRFDirectionalCfg):
         # Foot speed relative to the base [m/s] over which the gate switches.
         push_gate_speed = 0.1
         traction_ratio_limit = 2.0
+        # Slow walking uses the moving clocks; only near-zero commands stand.
+        stop_threshold = 0.2
+
+    class reward_settings(Go2OscORC111GRFDirectionalCfg.reward_settings):
+        # Load per foot that push_load credits [body weights]: a two-foot share.
+        push_load_cap = 0.5
+        # -sin(phase) at which the push weight reaches 1; 1.0 is a plain sine.
+        push_window_saturation = 0.5
+        # Gaussian turning reward sized for the 0.5 rad/s command range.
+        yaw_tracking_tolerance = 0.5
 
 
 class Go2OscPushGlideRunnerCfg(Go2OscORC111GRFDirectionalRunnerCfg):
@@ -357,6 +368,8 @@ class Go2OscPushGlideRunnerCfg(Go2OscORC111GRFDirectionalRunnerCfg):
                 stance_grf = 0.0
                 push_load = 5.0
                 glide_drag = 5.0
+                # Vertical base speed: separates a grounded gait from hopping.
+                lin_vel_z = 2.0
 
     class runner(Go2OscORC111GRFDirectionalRunnerCfg.runner):
         experiment_name = "go2osc_push_glide"

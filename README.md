@@ -129,7 +129,7 @@ the applied friction coefficient as privileged information.
 
 Training uses flat ground with friction sampled uniformly from `[0.1, 1.0]`
 per environment at startup. Moving forward commands are sampled uniformly
-from `[0.5, 1.5]` m/s, with standing and turning samples. Lateral and yaw
+from `[0.0, 1.5]` m/s, with standing and turning samples. Lateral and yaw
 commands are bounded by 0.3 m/s and 0.5 rad/s; commands resample every three
 seconds.
 
@@ -143,7 +143,7 @@ the Go2 physics asset.
 uv sync --frozen --extra gpu
 uv run --frozen --extra gpu python scripts/train.py \
     --task go2osc_push_glide --backend mujoco --device cuda:0 \
-    --num_envs 4096 --max_iterations 2000 --seed 0 \
+    --num_envs 4096 --max_iterations 500 --seed 0 \
     --headless --disable_wandb
 ```
 
@@ -152,7 +152,7 @@ use `--device cpu --num_envs 16`; full training is intended for a GPU.
 
 ## Play the included policy
 
-The trained checkpoint is [policies/go2osc_push_glide/model_2000.pt](policies/go2osc_push_glide/model_2000.pt).
+The trained checkpoint is [policies/go2osc_push_glide/model_500.pt](policies/go2osc_push_glide/model_500.pt).
 Its configuration and training metadata are recorded in
 [policy.json](policies/go2osc_push_glide/policy.json).
 Install the standard dependencies with `uv sync --frozen`, then run one of
@@ -164,7 +164,7 @@ macOS requires `mjpython` for the viewer:
 uv run --frozen mjpython scripts/play.py \
     --task go2osc_push_glide --backend mujoco --device cpu --num_envs 1 \
     --experiment_name "$PWD/policies" --load_run go2osc_push_glide \
-    --checkpoint 2000 --seed 123
+    --checkpoint 500 --seed 123
 ```
 
 On Linux, use Python:
@@ -173,7 +173,7 @@ On Linux, use Python:
 uv run --frozen python scripts/play.py \
     --task go2osc_push_glide --backend mujoco --device cpu --num_envs 1 \
     --experiment_name "$PWD/policies" --load_run go2osc_push_glide \
-    --checkpoint 2000 --seed 123
+    --checkpoint 500 --seed 123
 ```
 
 Playback starts at 1 m/s forward. Press **I/K** to adjust forward velocity,
