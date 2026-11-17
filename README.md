@@ -191,6 +191,28 @@ Playback starts at 1 m/s forward. Press **I/K** to adjust forward velocity,
 quit. Releasing a key keeps the selected command. Playback samples friction
 from the policy's training range.
 
+## Go2 visuals and video recording
+
+The Go2 renders with its real meshes once they are downloaded (MuJoCo
+Menagerie's `unitree_go2`, pinned and checksum-verified, about 28 MB, into the
+git-ignored `resources/robots/go2/mjcf/`). Without them it renders as its
+collision shapes. The meshes are display-only; physics still comes from the URDF.
+
+```sh
+uv run --frozen python scripts/fetch_go2_meshes.py
+```
+
+`scripts/play.py --video PATH` records environment 0 to an MP4 instead of
+opening a viewer: the camera follows the robot, and an overlay shows time,
+friction, commanded vs measured velocity, and loaded feet (`--no-overlay`
+to hide it). Combine with `--friction MU` and `--command VX VY YAW`:
+
+```sh
+uv run --frozen python scripts/play.py --task go2osc_push_glide \
+    --load_run RUN --friction 0.1 --command 1.0 0 0 \
+    --video logs/videos/ice.mp4 --video_seconds 10
+```
+
 ## Record acceleration and a zero-command stop
 
 Install `ffmpeg` (`brew install ffmpeg` on macOS or `sudo apt install ffmpeg`

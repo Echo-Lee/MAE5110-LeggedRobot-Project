@@ -7,9 +7,20 @@ Usage:
                            --checkpoint 1500
 
 Supports MuJoCo CPU/Warp and optional VSim checkpoints.
+
+Record a real-time MP4 of environment 0 instead of opening a viewer, on a
+chosen surface and with a fixed command (MuJoCo CPU backend). The camera
+follows the robot; the overlay shows time, friction, command vs actual
+velocity, and loaded feet:
+    uv run scripts/play.py --task go2osc_push_glide --load_run RUN \
+        --friction 0.1 --command 1.0 0 0 --video logs/videos/ice.mp4
+
+The Go2 renders with its real meshes when they are installed
+(uv run scripts/fetch_go2_meshes.py); otherwise with its collision shapes.
 """
 
 import argparse
+import os
 import random
 
 import torch
@@ -22,7 +33,12 @@ def get_play_args(argv=None):
     parser = argparse.ArgumentParser(description="Play a policy trained with Q2")
     parser.add_argument("--task", type=str, required=True)
     parser.add_argument("--device", type=str, default="cpu")
-    parser.add_argument("--num_envs", type=int, default=32)
+    parser.add_argument(
+        "--num_envs",
+        type=int,
+        default=None,
+        help="environments to simulate (default: 32, or 1 with --video)",
+    )
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument(
         "--experiment_name",
@@ -65,6 +81,50 @@ def get_play_args(argv=None):
         "alongside keyboard teleop)",
     )
     parser.add_argument(
+        "--follow_camera",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="lock the MuJoCo viewer camera onto the robot (environment 0); "
+        "mouse still orbits and zooms around it, F toggles it during "
+        "playback. Use --no-follow_camera for a fixed camera.",
+    )
+    parser.add_argument(
+        "--friction",
+        type=float,
+        default=None,
+        help="fix every environment's contact friction to this coefficient, "
+        "replacing the task's friction randomization",
+    )
+    parser.add_argument(
+        "--command",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar=("VX", "VY", "YAW"),
+        help="hold this velocity command (m/s, m/s, rad/s) for the whole "
+        "playback; disables keyboard teleop",
+    )
+    parser.add_argument(
+        "--video",
+        type=str,
+        default=None,
+        help="record environment 0 to this MP4 path instead of opening a "
+        "viewer (MuJoCo CPU backend; needs ffmpeg)",
+    )
+    parser.add_argument(
+        "--video_seconds",
+        type=float,
+        default=10.0,
+        help="length of the recording in simulated seconds",
+    )
+    parser.add_argument(
+        "--overlay",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="draw time, friction, command vs actual velocity, and foot "
+        "contacts on the video. Use --no-overlay for a clean video.",
+    )
+    parser.add_argument(
         "--keyboard",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -72,7 +132,17 @@ def get_play_args(argv=None):
         "gym/utils/interfaces/MujocoKeyboardInterface.py for key bindings). "
         "Use --no-keyboard to disable.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.num_envs is None:
+        args.num_envs = 1 if args.video else 32
+    if args.video:
+        # A recording renders off-screen; no interactive viewer is opened.
+        args.headless = True
+    if args.friction is not None and args.friction <= 0:
+        parser.error("--friction must be positive")
+    if args.video_seconds <= 0:
+        parser.error("--video_seconds must be positive")
+    return args
 
 
 def setup(args):
@@ -96,6 +166,26 @@ def setup(args):
     env_cfg.init_state.reset_mode = "reset_to_basic"
     if hasattr(env_cfg, "viewer"):
         env_cfg.viewer.show_ui = args.viewer_ui
+    if args.video:
+        # Per-environment mass randomization makes the CPU backend discard
+        # visual assets when headless (no ground texture, skybox, or lights),
+        # which hides sliding in a video. Record at nominal link masses.
+        env_cfg.domain_randomization.startup.link_mass_scale_range = None
+        # Load the configured visual model (real Go2 meshes) for off-screen
+        # rendering too, not only for the interactive viewer.
+        env_cfg.asset.render_offscreen = True
+    if args.friction is not None:
+        # Use the friction axis as a zero-width envelope: every environment
+        # starts on exactly this coefficient and keeps it, and the backend
+        # still allocates per-environment friction.
+        randomization = env_cfg.domain_randomization
+        randomization.startup.contact_friction_range = [args.friction, args.friction]
+        # Optional refinements of the friction axis, where a task has them.
+        for name in ("contact_friction_bins", "contact_friction_bin_weights"):
+            if hasattr(randomization.startup, name):
+                setattr(randomization.startup, name, None)
+        if hasattr(randomization.episode, "resample_contact_friction"):
+            randomization.episode.resample_contact_friction = False
 
     if args.seed is not None:
         env_cfg.seed = args.seed
@@ -130,22 +220,62 @@ def setup(args):
     return env, runner
 
 
-def play(env, runner):
+def policy_step(env, runner, command):
+    if command is not None:
+        # Re-pin every step: the task's own command sampler may fire.
+        env.commands[:] = command
+    runner.set_actions(
+        runner.actor_cfg["actions"],
+        runner.get_inference_actions(),
+        runner.actor_cfg["disable_actions"],
+    )
+    env.step()
+
+
+def command_schedule(env, args):
+    """Return step -> command to hold, or None to leave commands alone."""
+    if args.command is None:
+        return lambda step: None
+    if not hasattr(env, "commands"):
+        raise SystemExit(f"task {args.task} has no velocity commands")
+    held = torch.tensor(args.command, device=env.device)
+    return lambda step: held
+
+
+def play(env, runner, command_at):
     n_steps = 10 * int(env.max_episode_length)
-    for _ in range(n_steps):
-        runner.set_actions(
-            runner.actor_cfg["actions"],
-            runner.get_inference_actions(),
-            runner.actor_cfg["disable_actions"],
-        )
-        env.step()
+    for step in range(n_steps):
+        policy_step(env, runner, command_at(step))
         env.check_exit()
+
+
+def record(env, runner, args, command_at):
+    from gym.utils.interfaces.VideoRecorder import VideoRecorder
+
+    os.makedirs(os.path.dirname(os.path.abspath(args.video)), exist_ok=True)
+    recorder = VideoRecorder(env, args.video, overlay=args.overlay)
+    try:
+        for step in range(round(args.video_seconds / env.dt)):
+            policy_step(env, runner, command_at(step))
+            recorder.capture(step)
+    finally:
+        recorder.close()
+    print(
+        f"wrote {args.video}: {recorder.frames} frames at {recorder.fps:g} fps, "
+        f"friction {env._backend.contact_friction[0].item():.3f}, "
+        "nominal link masses"
+    )
 
 
 if __name__ == "__main__":
     args = get_play_args()
+    if args.video and "MUJOCO_GL" not in os.environ and not os.environ.get("DISPLAY"):
+        # Headless machines (e.g. MoLab) need EGL for off-screen rendering.
+        # MuJoCo reads this when first imported, which happens in setup().
+        os.environ["MUJOCO_GL"] = "egl"
     with torch.no_grad():
         env, runner = setup(args)
+        command_at = command_schedule(env, args)
         # The MuJoCo warp (GPU) backend is headless-only: render() is a no-op and
         # it has no passive viewer, so nothing draws.  Point the user at cpu.
         if (
@@ -157,7 +287,22 @@ if __name__ == "__main__":
                 "WARNING: the MuJoCo warp (GPU) backend has no interactive viewer "
                 "— nothing will render. Use --device cpu for playback."
             )
-        if args.keyboard and hasattr(env, "commands") and not args.headless:
+        if args.follow_camera and not args.headless:
+            # Fixed-base tasks (pendulum, cartpole) have nothing to follow
+            # and keep their configured camera silently.
+            if not hasattr(env._backend, "set_camera_tracking"):
+                print(
+                    "WARNING: --follow_camera is only supported by the MuJoCo "
+                    "CPU viewer; keeping the configured camera."
+                )
+            elif env._backend.supports_camera_tracking:
+                env._backend.set_camera_tracking(True)
+        if (
+            args.keyboard
+            and args.command is None
+            and hasattr(env, "commands")
+            and not args.headless
+        ):
             # Each viewer has its own input model: MuJoCo dispatches key
             # events via a callback, vlearn polls key state per frame.
             if args.backend == "vsim":
@@ -184,4 +329,7 @@ if __name__ == "__main__":
                 from gym.utils.interfaces.CommandVisualizer import CommandVisualizer
 
                 CommandVisualizer(env)
-        play(env, runner)
+        if args.video:
+            record(env, runner, args, command_at)
+        else:
+            play(env, runner, command_at)

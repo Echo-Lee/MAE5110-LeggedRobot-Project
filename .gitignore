@@ -103,3 +103,6 @@ notebooks/__marimo__/
 
 # Published Go2 oscillator policy
 !policies/go2osc_push_glide/model_500.pt
+
+# Go2 visual meshes, downloaded by scripts/fetch_go2_meshes.py
+resources/robots/go2/mjcf/
