@@ -46,6 +46,8 @@ Engineering notebook to record the process of training, assumptions, edits, and 
 | 17 | **`Nov15_22-56-19_est_latch`** (seed 1; deployable) | Run 16 + 500 it with μ̂ latched at slide start (`latch_in_slide`) | Robustness **7/9** (corrected eval; run 16: 3/9): μ 0.2 braking 0.39 → 0.54 μg, distance 2.99 → 1.93×; falls at μ 0.2 in `entry_speeds` (2/8) and `combined` (1/8). μ̂ at μ 0.2 during run-up 0.11 → 0.38–0.47. Walking 29/30, switches 24/24. |
 | 18a | **`Nov15_23-24-23_est_accel_latch`** (seed 1; **best deployable**) | Run 17 + 500 it; estimator gets the IMU accelerometer (widened with zero weights), latch on | **Robustness 9/9, no falls in any scenario** (first full pass under the corrected eval; teacher run 12: 8/9). Walking 29/30, switches 24/24, 2 m/s RMSE at μ 0.3 / 0.5 / 1: 0.09 / 0.14 / 0.10. μ̂ at μ 0.2 0.17–0.21 (run 17: 0.38–0.47). μ 0.2 braking still 0.37–0.65 μg (teacher 0.74). |
 | 18b | `Nov15_23-24-48_est_accel_nolatch` (seed 1) | As 18a, latch off | Robustness 3/9: falls at μ 0.2 (62% in *entry_speeds*, 38% *push*) and μ 0.15 nominal (1/8). μ̂ at μ 0.2 most accurate yet (0.24–0.26), but braking harder on it tips the robot. The latch stays. |
+| 18a-s2 | `Nov16_00-28-29_est_accel_latch_seed2` (seed 2) | Run 18a repeated (different seed) | Robustness 8/9: one fall in 8 at μ 0.2 (*combined*; plus one at untrained μ 0.3). μ̂ at μ 0.2 0.15–0.16. Walking 29/30, switches 24/24. **18a's result reproduces.** |
+| 19 | `Nov16_00-28-02_est_noaccel_control` (seed 1) | Control: run 17 + 500 it, latch on, **no accelerometer** | Robustness 5/9: falls at μ 0.2 (38% *entry_speeds*, 12% *push*), 1/8 at μ 0.15 (*combined*), *messy_entry* decel. μ̂ at μ 0.2 0.34–0.53 (over-estimate, as run 17). **More iterations alone do not give 18a's gain.** |
 
 ### Result figures
 
@@ -396,7 +398,10 @@ Each run keeps the same color in every figure. Data: `logs/eval/*.json`.
 - *Runs:* both from run 17, 500 it, trained in parallel: **18a** latch on, **18b** latch off (accelerometer replacing the latch).
 - *Result:* 18a passes all 9 slide scenarios with no falls, keeps walking 29/30 and switches 24/24; 18b falls at μ 0.2. In both, μ̂ at μ 0.2 moved toward the truth (0.17–0.26 vs 0.38–0.47 in run 17). With the latch the policy acts on the run-up estimate; without it, the more accurate in-slide μ̂ leads it to brake harder at μ 0.2, where a hard stance tips (the teacher's edge too).
 - *Caveats:* one seed each; 18a differs from run 17 by the accelerometer *and* 500 more iterations (no run 17 + 500 it control); μ 0.2 braking (0.37–0.69 μg) is still below the teacher's 0.74, it passes on the μ 0.05–0.2 averages.
-- *Next (not started):* control run (run 17 + 500 it, no accelerometer) and a second seed of 18a to attribute the gain; accelerometer noise for realism; then the slide range (μ ≤ 0.25–0.3) or torque (`tau_est`) as the next sensor.
+- *Attribution (runs 19, 18a-s2):* the control (run 17 + 500 it without the accelerometer) scored 5/9 with 6 fall-instances and kept over-estimating μ 0.2 (0.34–0.53); 18a's second seed scored 8/9 with 2 (one at untrained μ 0.3) and μ̂ 0.15–0.16. So the accelerometer, not the extra training, fixes μ̂ at μ 0.2 and removes most falls. Note the accelerometer runs slightly *under*-estimate μ 0.2, which also means gentler braking; part of the fall reduction may come from that.
+- *What the accelerometer did not fix:* μ 0.2 braking is ~0.5 μg in all four runs (17, 19, 18a, 18a-s2) regardless of μ̂ accuracy, with all four feet down only 17–24% of the slide. Per-leg diagnostic (runs 12, 15, 18a; v0 1.2): in every run, the teacher included, FR carries the most load and RR the least (left/right asymmetry learned early, never penalized); at μ 0.2 the students shift ~50% of the load onto FR and nearly lift RL (loaded 30% of the slide; teacher 84%). The braking limit at μ 0.2 is now posture, not estimation.
+- *Next (not started):* (1) per-foot load balance in the slide evaluation; (2) scripted test of braced slide poses (front feet forward) at μ 0.1–0.3, adopt as the residual-hold / slide_pose target if one brakes near μg without tipping; (3) left/right mirror symmetry in training; then accelerometer noise/bias and the slide range (μ ≤ 0.25–0.3).
+- *Earlier next-step list:* accelerometer noise for realism; then the slide range (μ ≤ 0.25–0.3) or torque (`tau_est`) as the next sensor.
 
 ## Roadmap
 
@@ -436,3 +441,15 @@ Each stage changes one big thing (behavior → physics → structure), so result
 - Continuous log-uniform μ instead of two bins; friction-aware commands on ice.
 - Slide phase ends on a schedule, not on the robot's actual stop; consider a speed-based end (needs a velocity estimate).
 - Revisit: stand-still episodes.
+
+
+Prompt
+implement option 1 and the braced pose test
+Update changes.md as I pushed current work to github
+What sensors are available?
+Currently are we on continuous mu?
+Bump up training to sliding to mu 0.3?
+Implement accel noise and bias
+How can we identify the best coefficient to start sliding?
+Left/right mirror symmetry in training: removes the lopsidedness in walking too.
+Add posture hypothesis to designNotebook.md
