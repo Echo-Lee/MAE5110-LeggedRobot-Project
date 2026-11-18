@@ -12,7 +12,7 @@ import torch
 def setup_actor(run_name=None, deploy_cfg=None):
     if deploy_cfg is None:
         deploy_cfg = DeployConfig()
-    env_cfg, train_cfg = task_registry.get_cfgs(name=deploy_cfg.task_name)
+    env_cfg, train_cfg = task_registry.get_cfgs(name=deploy_cfg.task_name, original_cfg=True, load_run=run_name)
 
     env_cfg.env.num_envs = 1
     env_cfg.env.episode_length_s = 99999
@@ -28,8 +28,6 @@ def setup_actor(run_name=None, deploy_cfg=None):
 
     train_cfg.runner.device = "cpu"
     train_cfg.runner.resume = True
-    if run_name is not None:
-        train_cfg.runner.load_run = run_name
     train_cfg.runner.checkpoint = -1
     train_cfg.logging.enable_local_saving = False
 

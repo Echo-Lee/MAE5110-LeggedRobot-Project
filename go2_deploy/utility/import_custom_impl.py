@@ -6,7 +6,7 @@ def get_custom_impl_module(name="go2trot_base.py"):
     path = Path(repo_path / "custom_implementation" / name)
     spec = importlib.util.spec_from_file_location(path.stem, path)
     if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load file at {file_path}")
+        raise ImportError(f"Could not load file at {path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
