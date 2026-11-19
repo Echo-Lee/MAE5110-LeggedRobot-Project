@@ -5,7 +5,7 @@ from go2_deploy.utility.import_custom_impl import custom_impl
 
 
 class DeployConfig:
-    task_name = "go2trot"
+    task_name = "go2osc_wide_deploy_robust"
 
     ctrl_freq = 100  # Hz
 
