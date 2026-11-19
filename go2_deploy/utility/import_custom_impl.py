@@ -1,7 +1,7 @@
 import importlib.util
 from pathlib import Path
 
-def get_custom_impl_module(name="go2trot_base.py"):
+def get_custom_impl_module(name="tripedal_implementation_file.py"):
     repo_path = Path(__file__).resolve().parent.parent  
     path = Path(repo_path / "custom_implementation" / name)
     spec = importlib.util.spec_from_file_location(path.stem, path)
