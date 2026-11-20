@@ -1,0 +1,305 @@
+"""Push-glide Go2 with a learned friction and body-velocity estimator."""
+
+from pathlib import Path
+import warnings
+
+import torch
+
+from gym import GYM_ROOT_DIR
+from gym.envs.base.domain_randomization import (
+    contact_friction_bins,
+    contact_friction_range,
+)
+from gym.envs.go2.go2osc import Go2OscPushGlide
+from gym.envs.go2.go2osc_est_config import GRAVITY_M_S2
+from gym.utils.sampling import masked_update
+from gym.utils.torch_quat import quat_rotate_inverse
+from learning.modules.history_estimator import (
+    FRICTION_CLIP,
+    ConcurrentEstimator,
+    HistoryStateEstimator,
+    expand_estimator_inputs,
+    targets_from_env,
+)
+
+
+class Go2OscPushGlideEst(Go2OscPushGlide):
+    """Go2OscPushGlide plus an IMU accelerometer, friction switches and an
+    in-environment state estimator.
+
+    Every control step a history estimator reads the last 0.5 s of
+    ``state_estimator.features`` (signals a real Go2 has) and publishes
+    ``contact_friction_hat`` (mu-hat, clipped) and ``base_lin_vel_hat``
+    (body-frame v-hat). Physics, rewards and the critic keep the true
+    values. While the runner trains (``set_learning(True)``) the estimator
+    also trains on the true mu and velocity, and its weights are saved in
+    every policy checkpoint (``checkpoint_state``).
+    """
+
+    def _init_buffers(self):
+        super()._init_buffers()
+        # IMU accelerometer: specific force (acceleration minus gravity) in
+        # the body frame, as a real IMU reports it; (0, 0, g) standing still.
+        # Finite difference of the base velocity over one physics step.
+        self._physics_dt = self.dt / self.cfg.control.decimation
+        self._prev_world_lin_vel = self.root_states[:, 7:10].clone()
+        self.base_lin_acc = self._at_rest_specific_force()
+        # Mid-episode friction switch: when (s after reset) and to what mu.
+        # inf = no switch pending. time_since_friction_change restarts at
+        # every reset and every switch (estimator settling is measured from it).
+        self.friction_switch_time = torch.full(
+            (self.num_envs,), float("inf"), device=self.device
+        )
+        self.friction_switch_target = torch.zeros(self.num_envs, device=self.device)
+        self.time_since_friction_change = torch.zeros(self.num_envs, device=self.device)
+        # Writing friction every step costs a per-env loop on the CPU
+        # backend, so switches are only applied when something can switch.
+        self._friction_switch_enabled = self._friction_switch_settings() is not None
+        self._init_estimator()
+
+    # ------------------------------------------------------------------
+    # Accelerometer
+    # ------------------------------------------------------------------
+    def _at_rest_specific_force(self):
+        up = torch.zeros(self.num_envs, 3, device=self.device)
+        up[:, 2] = GRAVITY_M_S2
+        # root_states, not base_quat: right after a reset only the former
+        # holds the new orientation.
+        return quat_rotate_inverse(self.root_states[:, 3:7], up)
+
+    def _post_physics_step(self):
+        super()._post_physics_step()  # refreshes base_quat
+        world_vel = self.root_states[:, 7:10]
+        accel = (world_vel - self._prev_world_lin_vel) / self._physics_dt
+        accel[:, 2] += GRAVITY_M_S2  # specific force = a - g, g = (0, 0, -g)
+        self.base_lin_acc = quat_rotate_inverse(self.base_quat, accel)
+        self._prev_world_lin_vel = world_vel.clone()
+
+    # ------------------------------------------------------------------
+    # Friction switches
+    # ------------------------------------------------------------------
+    def _friction_switch_settings(self):
+        """The friction_switch config if switching is on, else None."""
+        settings = getattr(self.cfg, "friction_switch", None)
+        if settings is None or settings.probability <= 0.0:
+            return None
+        return settings
+
+    def _friction_switch_bins(self):
+        """(bounds [B, 2], weights [B]); one bin = the whole friction range."""
+        binned = contact_friction_bins(self.cfg)
+        if binned is None:
+            envelope = contact_friction_range(self.cfg)
+            if envelope is None:
+                raise ValueError("friction_switch needs contact_friction_range")
+            bins, weights = [envelope], [1.0]
+        else:
+            bins, weights = binned
+        bounds = torch.tensor(bins, dtype=torch.float, device=self.device)
+        weights = torch.tensor(weights, dtype=torch.float, device=self.device)
+        return bounds, weights
+
+    def _sample_friction_switches(self, reset_mask):
+        """Schedule one mid-episode switch for some resetting envs.
+
+        Each resetting env switches with friction_switch.probability, at a
+        time uniform in time_range, to a mu uniform in another bin chosen in
+        proportion to the bin weights (with a single bin: anywhere in it).
+        """
+        settings = self._friction_switch_settings()
+        if settings is None:
+            return
+        bounds, weights = self._friction_switch_bins()
+        others = weights.expand(self.num_envs, -1).clone()
+        if len(bounds) > 1:
+            # Bin of the current mu (bins are ordered; edges belong to the lower).
+            friction = self._backend.contact_friction
+            current = (friction.unsqueeze(1) > bounds[:, 1]).sum(dim=1)
+            current = current.clamp(max=len(bounds) - 1)
+            others.scatter_(1, current.unsqueeze(1), 0.0)
+        target_bin = torch.multinomial(others, 1).squeeze(1)
+
+        def rand():
+            return torch.rand(self.num_envs, device=self.device)
+
+        chosen = rand() < settings.probability
+        low, high = settings.time_range
+        when = low + (high - low) * rand()
+        when = torch.where(chosen, when, torch.full_like(when, float("inf")))
+        lo, hi = bounds[target_bin, 0], bounds[target_bin, 1]
+        target = lo + (hi - lo) * rand()
+        masked_update(self.friction_switch_time, when, reset_mask)
+        masked_update(self.friction_switch_target, target, reset_mask)
+
+    def schedule_friction_switch(self, env_ids, time_s, friction):
+        """Force a switch (evaluation): env_ids change to ``friction`` at time_s."""
+        self.friction_switch_time[env_ids] = torch.as_tensor(
+            time_s, dtype=torch.float, device=self.device
+        )
+        self.friction_switch_target[env_ids] = torch.as_tensor(
+            friction, dtype=torch.float, device=self.device
+        )
+        self._friction_switch_enabled = True
+
+    def _apply_friction_switch(self):
+        """Apply due switches; keeps time_since_friction_change current.
+
+        One full masked write, like DomainRandomizer.randomize_episode, so no
+        GPU->host sync is needed to find the switching envs.
+        """
+        self.time_since_friction_change += self.dt
+        if not self._friction_switch_enabled:
+            return
+        time_s = self.episode_length_buf * self.dt
+        due = time_s >= self.friction_switch_time
+        current = self._backend.contact_friction
+        self._backend.set_contact_friction(
+            torch.arange(self.num_envs, device=self.device),
+            torch.where(due, self.friction_switch_target, current),
+        )
+        self.friction_switch_time.masked_fill_(due, float("inf"))
+        self.time_since_friction_change.masked_fill_(due, 0.0)
+        self._refresh_friction_observation()  # critic sees the new mu now
+
+    # ------------------------------------------------------------------
+    # Estimator
+    # ------------------------------------------------------------------
+    def _init_estimator(self):
+        settings = self.cfg.state_estimator
+        model, new_inputs = self._widen(self._load_estimator_model(settings))
+        self.estimator_features = model.config["features"]
+        self.estimator = ConcurrentEstimator(
+            model,
+            self.num_envs,
+            self.device,
+            learning_rate=settings.learning_rate,
+            samples_per_step=settings.samples_per_step,
+            update_interval=settings.update_interval,
+            gradient_steps=settings.gradient_steps,
+        )
+        self.estimator.unnormalized_inputs = new_inputs
+        # Per-feature sensor-noise std for the estimator's inputs (set by
+        # evaluations that perturb sensors; None = clean).
+        self.estimator_noise_std = None
+        self.contact_friction_hat = torch.zeros(self.num_envs, 1, device=self.device)
+        self.base_lin_vel_hat = torch.zeros(self.num_envs, 3, device=self.device)
+        self._estimator_updates_reported = 0
+
+    def _feature_dims(self, features):
+        return [self.get_states([name]).shape[1] for name in features]
+
+    def _load_estimator_model(self, settings):
+        """The initial estimator: the configured file, else untrained."""
+        path = Path(settings.init_path) if settings.init_path else None
+        if path is not None and not path.is_absolute():
+            path = Path(GYM_ROOT_DIR) / path
+        if path is not None:
+            if not path.exists():
+                raise FileNotFoundError(f"state estimator file {path} not found")
+            model, _ = HistoryStateEstimator.load(path, self.device)
+            return model
+        warnings.warn(
+            "starting from an untrained state estimator: valid for pretraining "
+            "or when a go2osc_push_glide_est checkpoint supplies its weights"
+        )
+        features = list(settings.features)
+        return HistoryStateEstimator(
+            features=features,
+            feature_dims=self._feature_dims(features),
+            frames=settings.frames,
+            stride=settings.stride,
+            hidden_dims=settings.hidden_dims,
+        )
+
+    def _widen(self, model):
+        """(model, mask of new inputs or None) taking the configured features."""
+        wanted = list(self.cfg.state_estimator.features)
+        if list(model.config["features"]) == wanted:
+            return model.to(self.device), None
+        model, new_inputs = expand_estimator_inputs(
+            model, wanted, self._feature_dims(wanted)
+        )
+        return model.to(self.device), new_inputs.to(self.device)
+
+    def _publish_estimate(self):
+        self.contact_friction_hat = self.estimator.mu_hat.clamp(
+            *FRICTION_CLIP
+        ).unsqueeze(1)
+        self.base_lin_vel_hat = self.estimator.v_hat
+
+    def _report_estimator_loss(self):
+        updates = self.estimator.updates
+        if updates >= self._estimator_updates_reported + 50:
+            self._estimator_updates_reported = updates
+            print(
+                f"[state estimator] update {updates}: "
+                f"loss {self.estimator.last_loss:.4f}",
+                flush=True,
+            )
+
+    # ------------------------------------------------------------------
+    # Step and reset
+    # ------------------------------------------------------------------
+    def _post_decimation_step(self):
+        super()._post_decimation_step()
+        self._apply_friction_switch()
+        self.estimator.step(
+            self.get_states(self.estimator_features),
+            targets_from_env(self),
+            self.estimator_noise_std,
+        )
+        self._publish_estimate()
+        self._report_estimator_loss()
+
+    def _reset_idx(self, reset_mask):
+        super()._reset_idx(reset_mask)  # resamples friction, then commands
+        if not hasattr(self, "estimator"):  # reset() also runs during __init__
+            return
+        # A reset teleports the base: restart the accelerometer's difference
+        # (out of place: these may be inference tensors after a PPO rollout).
+        mask = reset_mask.unsqueeze(1)
+        self._prev_world_lin_vel = torch.where(
+            mask, self.root_states[:, 7:10], self._prev_world_lin_vel
+        )
+        self.base_lin_acc = torch.where(
+            mask, self._at_rest_specific_force(), self.base_lin_acc
+        )
+        self._sample_friction_switches(reset_mask)
+        self.time_since_friction_change.masked_fill_(reset_mask, 0.0)
+        self.estimator.reset(reset_mask, self.get_states(self.estimator_features))
+        self._publish_estimate()
+
+    # ------------------------------------------------------------------
+    # Hooks called by OnPolicyRunner
+    # ------------------------------------------------------------------
+    def set_learning(self, enabled):
+        self.estimator.learning = bool(enabled) and self.cfg.state_estimator.learn
+
+    def checkpoint_state(self):
+        return {
+            "state_estimator": self.estimator.state_dict(),
+            "estimator_config": self.estimator.model.config,
+        }
+
+    def load_checkpoint_state(self, state):
+        if "state_estimator" not in state:
+            return
+        saved = state["state_estimator"]
+        config = state["estimator_config"]
+        model = HistoryStateEstimator(
+            features=config["features"],
+            feature_dims=config["feature_dims"],
+            frames=config["frames"],
+            stride=config["stride"],
+            hidden_dims=config["hidden_dims"],
+            activation=config["activation"],
+        )
+        model.load_state_dict(saved["model"])
+        model, new_inputs = self._widen(model)
+        self.estimator.set_model(model, new_inputs)
+        if new_inputs is None:  # same architecture: keep Adam's moments
+            self.estimator.optimizer.load_state_dict(saved["optimizer"])
+        self.estimator_features = model.config["features"]
+        everyone = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        self.estimator.reset(everyone, self.get_states(self.estimator_features))
+        self._publish_estimate()
