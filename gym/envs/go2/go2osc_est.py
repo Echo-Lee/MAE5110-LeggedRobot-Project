@@ -13,7 +13,8 @@ from gym.envs.base.domain_randomization import (
 from gym.envs.go2.go2osc import Go2OscPushGlide
 from gym.envs.go2.go2osc_est_config import GRAVITY_M_S2
 from gym.utils.sampling import masked_update
-from gym.utils.torch_quat import quat_rotate_inverse
+from gym.utils.torch_quat import quat_apply, quat_rotate_inverse
+
 from learning.modules.history_estimator import (
     FRICTION_CLIP,
     ConcurrentEstimator,
@@ -21,6 +22,16 @@ from learning.modules.history_estimator import (
     expand_estimator_inputs,
     targets_from_env,
 )
+
+LEGS = ("FL", "FR", "RL", "RR")  # order of the actuators and feet_indices
+# Joint axes in each joint's child-body frame (resources/robots/go2/urdf/go2.urdf):
+# hip abduction about x, thigh and calf about y. Body origins are the joints.
+LEG_JOINT_AXES = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 1.0, 0.0))
+# Damping of the Jacobian inverse [m]: keeps forces finite near a straight leg.
+JACOBIAN_DAMPING = 0.01
+# Forces are in body weights; clip swing-phase and near-singular spikes.
+FOOT_FORCE_CLIP = 3.0
+TRACTION_RATIO_CLIP = 2.0
 
 
 class Go2OscPushGlideEst(Go2OscPushGlide):
@@ -55,7 +66,89 @@ class Go2OscPushGlideEst(Go2OscPushGlide):
         # Writing friction every step costs a per-env loop on the CPU
         # backend, so switches are only applied when something can switch.
         self._friction_switch_enabled = self._friction_switch_settings() is not None
+        self._init_leg_kinematics()
         self._init_estimator()
+
+    # ------------------------------------------------------------------
+    # Leg kinematics: Jacobian-transpose foot forces (deployable GRF)
+    # ------------------------------------------------------------------
+    def _init_leg_kinematics(self):
+        """Body indices per leg and zeroed feature buffers.
+
+        Features (all in the base frame, from joint encoders, motor torques
+        and the IMU, i.e. what the real robot can compute):
+            foot_force_est     [N, 12] ground force on each foot from
+                               F = -(J^T)^-1 tau, in body weights
+            foot_traction_est  [N, 8]  tangential / normal force per foot
+                               (x, y), zero for unloaded feet
+            foot_vel_rel_base  [N, 12] foot velocity relative to the base
+                               origin, omega x r + J qdot [m/s]; for a stance
+                               foot that does not slip it equals -v_base
+        Leg inertia is ignored, so swing-phase forces are not ground forces.
+        """
+        names = self._backend.body_names
+        self._leg_bodies = torch.tensor(
+            [
+                [names.index(f"{leg}_{part}") for part in ("hip", "thigh", "calf")]
+                for leg in LEGS
+            ],
+            device=self.device,
+        )  # [4 legs, 3 joints]
+        self._leg_axes = torch.tensor(LEG_JOINT_AXES, device=self.device)
+        self.foot_force_est = torch.zeros(self.num_envs, 12, device=self.device)
+        self.foot_traction_est = torch.zeros(self.num_envs, 8, device=self.device)
+        self.foot_vel_rel_base = torch.zeros(self.num_envs, 12, device=self.device)
+        self._refresh_leg_kinematics()
+
+    def _leg_jacobians(self):
+        """(J [N, 4, 3, 3] base frame, foot position r [N, 4, 3] from base).
+
+        Geometric Jacobian of the foot point: column j = axis_j x (p - o_j).
+        """
+        n = self.num_envs
+        bodies = self._leg_bodies.flatten()
+        origins = self._rigid_body_pos.index_select(1, bodies).view(n, 4, 3, 3)
+        quats = self._rigid_body_quat.index_select(1, bodies).view(n, 4, 3, 4)
+        axes = quat_apply(quats.reshape(-1, 4), self._leg_axes.repeat(n * 4, 1)).view(
+            n, 4, 3, 3
+        )
+        foot_quat = self._rigid_body_quat.index_select(1, self.feet_indices)
+        foot = self._rigid_body_pos.index_select(1, self.feet_indices) + quat_apply(
+            foot_quat.reshape(-1, 4), self._foot_collision_offsets.reshape(-1, 3)
+        ).view(n, 4, 3)
+        columns = torch.cross(axes, foot.unsqueeze(2) - origins, dim=-1)
+        base_quat = self.base_quat.repeat_interleave(12, dim=0)
+        columns = quat_rotate_inverse(base_quat, columns.reshape(-1, 3)).view(
+            n, 4, 3, 3
+        )
+        lever = quat_rotate_inverse(
+            self.base_quat.repeat_interleave(4, dim=0),
+            (foot - self.root_states[:, None, :3]).reshape(-1, 3),
+        ).view(n, 4, 3)
+        return columns.transpose(-1, -2), lever  # J[..., i, j]: row i, joint j
+
+    def _refresh_leg_kinematics(self):
+        jacobian, lever = self._leg_jacobians()
+        n = self.num_envs
+        tau = self.torques.view(n, 4, 3).unsqueeze(-1)
+        # tau_motor + J^T F_ground = 0 (static leg): F = -J (J^T J + l^2 I)^-1 tau
+        damping = JACOBIAN_DAMPING**2 * torch.eye(3, device=self.device)
+        gram = jacobian.transpose(-1, -2) @ jacobian + damping
+        force = -(jacobian @ torch.linalg.solve(gram, tau)).squeeze(-1)
+        weight = (self._backend.link_mass.sum(dim=1) * GRAVITY_M_S2).view(n, 1, 1)
+        force = (force / weight).clamp(-FOOT_FORCE_CLIP, FOOT_FORCE_CLIP)
+        normal = force[..., 2]
+        loaded = normal > self.cfg.osc.directional_min_load
+        ratio = (force[..., :2] / normal.clamp(min=1e-6).unsqueeze(-1)).clamp(
+            -TRACTION_RATIO_CLIP, TRACTION_RATIO_CLIP
+        )
+        ratio = torch.where(loaded.unsqueeze(-1), ratio, torch.zeros_like(ratio))
+        qdot = self.dof_vel.view(n, 4, 3).unsqueeze(-1)
+        omega = self.base_ang_vel.unsqueeze(1).expand(n, 4, 3)
+        velocity = torch.cross(omega, lever, dim=-1) + (jacobian @ qdot).squeeze(-1)
+        self.foot_force_est = force.reshape(n, 12)
+        self.foot_traction_est = ratio.reshape(n, 8)
+        self.foot_vel_rel_base = velocity.reshape(n, 12)
 
     # ------------------------------------------------------------------
     # Accelerometer
@@ -166,7 +259,14 @@ class Go2OscPushGlideEst(Go2OscPushGlide):
     # ------------------------------------------------------------------
     def _init_estimator(self):
         settings = self.cfg.state_estimator
-        model, new_inputs = self._widen(self._load_estimator_model(settings))
+        model, untrained = self._load_estimator_model(settings)
+        model, new_inputs = self._widen(model)
+        if untrained:
+            # Every input still has mean 0, std 1: take them from the first
+            # batch of training data (a pretraining script may set them first).
+            new_inputs = torch.ones(
+                model.input_mean.numel(), dtype=torch.bool, device=self.device
+            )
         self.estimator_features = model.config["features"]
         self.estimator = ConcurrentEstimator(
             model,
@@ -189,7 +289,7 @@ class Go2OscPushGlideEst(Go2OscPushGlide):
         return [self.get_states([name]).shape[1] for name in features]
 
     def _load_estimator_model(self, settings):
-        """The initial estimator: the configured file, else untrained."""
+        """(initial estimator, untrained?): the configured file, else untrained."""
         path = Path(settings.init_path) if settings.init_path else None
         if path is not None and not path.is_absolute():
             path = Path(GYM_ROOT_DIR) / path
@@ -197,19 +297,20 @@ class Go2OscPushGlideEst(Go2OscPushGlide):
             if not path.exists():
                 raise FileNotFoundError(f"state estimator file {path} not found")
             model, _ = HistoryStateEstimator.load(path, self.device)
-            return model
+            return model, False
         warnings.warn(
             "starting from an untrained state estimator: valid for pretraining "
             "or when a go2osc_push_glide_est checkpoint supplies its weights"
         )
         features = list(settings.features)
-        return HistoryStateEstimator(
+        model = HistoryStateEstimator(
             features=features,
             feature_dims=self._feature_dims(features),
             frames=settings.frames,
             stride=settings.stride,
             hidden_dims=settings.hidden_dims,
         )
+        return model, True
 
     def _widen(self, model):
         """(model, mask of new inputs or None) taking the configured features."""
@@ -243,6 +344,7 @@ class Go2OscPushGlideEst(Go2OscPushGlide):
     def _post_decimation_step(self):
         super()._post_decimation_step()
         self._apply_friction_switch()
+        self._refresh_leg_kinematics()
         self.estimator.step(
             self.get_states(self.estimator_features),
             targets_from_env(self),
@@ -266,6 +368,7 @@ class Go2OscPushGlideEst(Go2OscPushGlide):
         )
         self._sample_friction_switches(reset_mask)
         self.time_since_friction_change.masked_fill_(reset_mask, 0.0)
+        self._refresh_leg_kinematics()
         self.estimator.reset(reset_mask, self.get_states(self.estimator_features))
         self._publish_estimate()
 

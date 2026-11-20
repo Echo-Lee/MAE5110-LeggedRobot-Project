@@ -195,6 +195,18 @@ def test_estimator_trains_only_while_learning(env):
     assert env.estimator.updates == frozen
 
 
+def test_untrained_estimator_takes_its_input_normalization_from_data(env):
+    model = env.estimator.model
+    assert env.estimator.unnormalized_inputs.all()
+    assert torch.all(model.input_std == 1.0)
+    env.set_learning(True)
+    for _ in range(4):
+        env.step()
+    assert env.estimator.unnormalized_inputs is None
+    assert not torch.all(model.input_std == 1.0)
+    assert torch.all(model.input_std >= 1e-3)
+
+
 def test_checkpoint_state_restores_the_same_estimator(env):
     env.set_learning(True)
     for _ in range(4):
@@ -241,3 +253,48 @@ def test_missing_estimator_file_fails_loudly(tmp_path):
 
     with pytest.raises(FileNotFoundError):
         _make(missing)
+
+
+def test_jacobian_force_inverts_the_joint_torques_it_would_cause(env):
+    for _ in range(3):
+        env.step()
+    jacobian, _ = env._leg_jacobians()
+    n = env.num_envs
+    weight = (env._backend.link_mass.sum(dim=1) * 9.81).view(n, 1, 1)
+    known = torch.tensor([0.05, -0.03, 0.25]).expand(n, 4, 3)  # body weights
+    # Static leg: tau_motor = -J^T F_ground.
+    env.torques = -(jacobian.transpose(-1, -2) @ (known * weight).unsqueeze(-1)).view(
+        n, 12
+    )
+    env._refresh_leg_kinematics()
+    torch.testing.assert_close(
+        env.foot_force_est.view(n, 4, 3), known, atol=2e-3, rtol=1e-2
+    )
+    torch.testing.assert_close(
+        env.foot_traction_est.view(n, 4, 2),
+        known[..., :2] / known[..., 2:3],
+        atol=1e-2,
+        rtol=1e-2,
+    )
+
+
+def test_unloaded_feet_report_zero_traction(env):
+    env.torques = torch.zeros_like(env.torques)
+    env._refresh_leg_kinematics()
+    assert torch.all(env.foot_force_est.abs() < 1e-6)
+    assert torch.all(env.foot_traction_est == 0.0)
+
+
+def test_foot_velocity_relative_to_base_matches_the_simulator(env):
+    from gym.utils.torch_quat import quat_rotate_inverse
+
+    for step in range(6):
+        env.dof_pos_target[:] = 0.3 * torch.sin(torch.tensor(float(step)))
+        env.step()
+    velocity, _ = env._foot_sliding_velocities()  # world, foot point
+    relative = velocity - env.root_states[:, None, 7:10]
+    n = env.num_envs
+    expected = quat_rotate_inverse(
+        env.base_quat.repeat_interleave(4, dim=0), relative.reshape(-1, 3)
+    ).view(n, 12)
+    torch.testing.assert_close(env.foot_vel_rel_base, expected, atol=1e-4, rtol=1e-3)
