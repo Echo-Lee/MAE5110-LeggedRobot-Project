@@ -325,6 +325,20 @@ def test_blind_and_oracle_differ_from_the_est_task_only_in_actor_inputs():
     assert "foot_traction_obs" not in oracle.actor.obs
 
 
+def test_stage5_tasks_keep_the_joint_limit_penalties_of_the_base_policy():
+    from gym.envs.go2.go2osc_posture_config import Go2OscPushGlidePostureRunnerCfg
+
+    posture = Go2OscPushGlidePostureRunnerCfg.critic.reward.weights
+    for name in (
+        "go2osc_push_glide_est",
+        "go2osc_push_glide_blind",
+        "go2osc_push_glide_oracle",
+    ):
+        weights = task_registry.get_cfgs(name)[1].critic.reward.weights
+        assert weights.dof_pos_limits == posture.dof_pos_limits > 0
+        assert weights.dof_pos_target_limits == posture.dof_pos_target_limits > 0
+
+
 def test_oracle_inputs_match_the_estimates_in_size_and_scale(env):
     true = configs.TRUE_STATE_OBSERVATIONS
     estimates = configs.ESTIMATE_OBSERVATIONS

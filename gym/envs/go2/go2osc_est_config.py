@@ -14,6 +14,7 @@ same checkpoint, so fine-tuning is a plain resume:
 """
 
 from gym.envs.go2.go2_config import BASE_HEIGHT_REF
+from gym.envs.go2.go2osc_posture_config import Go2OscPushGlidePostureRunnerCfg
 from gym.envs.go2.go2osc_config import (
     PHASE_OBSERVATIONS,
     Go2OscPushGlideCfg,
@@ -21,6 +22,7 @@ from gym.envs.go2.go2osc_config import (
 )
 
 GRAVITY_M_S2 = 9.81
+POSTURE_WEIGHTS = Go2OscPushGlidePostureRunnerCfg.critic.reward.weights
 
 # Same envelope as the team's task. The three bins only give friction
 # switches a "different surface" to jump to; weights proportional to bin
@@ -122,6 +124,15 @@ class Go2OscPushGlideEstRunnerCfg(Go2OscPushGlideRunnerCfg):
         # The deployable inputs, then the estimates. The critic keeps its
         # privileged inputs (training only).
         obs = DEPLOYABLE_ACTOR_OBSERVATIONS + ESTIMATE_OBSERVATIONS
+
+    class critic(Go2OscPushGlideRunnerCfg.critic):
+        class reward(Go2OscPushGlideRunnerCfg.critic.reward):
+            class weights(Go2OscPushGlideRunnerCfg.critic.reward.weights):
+                # Keep the joint-limit penalties the base policy was
+                # fine-tuned with (go2osc_push_glide_posture), so stage 5
+                # does not drift back onto the calf stops.
+                dof_pos_target_limits = POSTURE_WEIGHTS.dof_pos_target_limits
+                dof_pos_limits = POSTURE_WEIGHTS.dof_pos_limits
 
     class runner(Go2OscPushGlideRunnerCfg.runner):
         experiment_name = "go2osc_push_glide_est"
