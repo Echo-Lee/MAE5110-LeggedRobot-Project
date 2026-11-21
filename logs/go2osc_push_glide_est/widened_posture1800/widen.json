@@ -1,0 +1,106 @@
+{
+  "task": "go2osc_push_glide_est",
+  "source_policy": "/home/tommy/MAE5110-LeggedRobot-Project/logs/go2osc_posture1800/go2osc_push_glide",
+  "source_sha256": "aba77d56a7547173f7d8ab4a13f815ef1cc19f4942dbecf83752990a0e380489",
+  "estimator": "/home/tommy/MAE5110-LeggedRobot-Project/logs/go2osc_push_glide_est/pretrain_posture1800_noise_jacobian_s1/estimator.pt",
+  "iteration": 1800,
+  "old_inputs": [
+    [
+      "base_ang_vel",
+      3
+    ],
+    [
+      "projected_gravity",
+      3
+    ],
+    [
+      "commands",
+      3
+    ],
+    [
+      "dof_pos_obs",
+      12
+    ],
+    [
+      "dof_vel",
+      12
+    ],
+    [
+      "dof_pos_target",
+      12
+    ],
+    [
+      "oscillator_obs",
+      8
+    ],
+    [
+      "foot_traction_obs",
+      8
+    ]
+  ],
+  "new_inputs": [
+    [
+      "base_ang_vel",
+      3
+    ],
+    [
+      "projected_gravity",
+      3
+    ],
+    [
+      "commands",
+      3
+    ],
+    [
+      "dof_pos_obs",
+      12
+    ],
+    [
+      "dof_vel",
+      12
+    ],
+    [
+      "dof_pos_target",
+      12
+    ],
+    [
+      "oscillator_obs",
+      8
+    ],
+    [
+      "contact_friction_hat",
+      1
+    ],
+    [
+      "base_lin_vel_hat",
+      3
+    ]
+  ],
+  "added_input_stats": {
+    "contact_friction_hat": {
+      "mean": [
+        0.5150110125541687
+      ],
+      "var": [
+        0.04911075904965401
+      ]
+    },
+    "base_lin_vel_hat": {
+      "mean": [
+        1.2725480794906616,
+        0.019273018464446068,
+        0.0040939245373010635
+      ],
+      "var": [
+        1.1883844137191772,
+        0.09217934310436249,
+        0.002702834317460656
+      ]
+    }
+  },
+  "dropped_inputs": [
+    "foot_traction_obs"
+  ],
+  "max_action_difference_vs_original_fed_dropped_means": 0.0,
+  "max_mean_action_change_from_dropping": 0.06892315298318863
+}
