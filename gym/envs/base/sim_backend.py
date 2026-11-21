@@ -166,6 +166,44 @@ class SimBackend(ABC):
             )
         return ids, values
 
+    def set_contact_friction_by_body(
+        self,
+        env_ids: torch.Tensor,
+        body_indices: torch.Tensor,
+        coefficients: torch.Tensor,
+    ) -> None:
+        """Give selected canonical bodies their own sliding friction.
+
+        ``coefficients`` is [len(env_ids), len(body_indices)]. Every other
+        geom of those environments, the ground included, takes the row
+        minimum, so under larger-coefficient mixing each selected body meets
+        the ground at its own value. ``contact_friction`` reports the row
+        mean. May be called between any two steps.
+        """
+        raise NotImplementedError
+
+    def _prepare_body_friction_update(
+        self,
+        env_ids: torch.Tensor,
+        body_indices: torch.Tensor,
+        coefficients: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Move a per-body friction update to the backend device and check it."""
+        ids = torch.as_tensor(env_ids, dtype=torch.long, device=self.device).flatten()
+        bodies = torch.as_tensor(
+            body_indices, dtype=torch.long, device=self.device
+        ).flatten()
+        values = torch.as_tensor(coefficients, dtype=torch.float, device=self.device)
+        expected = (ids.numel(), bodies.numel())
+        if values.shape != expected:
+            raise ValueError(
+                "one contact-friction coefficient is required per environment "
+                f"and body: expected {expected}, got {tuple(values.shape)}"
+            )
+        if values.numel() and not bool((torch.isfinite(values) & (values >= 0)).all()):
+            raise ValueError("contact-friction coefficients must be finite and >= 0")
+        return ids, bodies, values
+
     @property
     def link_mass(self) -> torch.Tensor:
         """[num_envs, num_bodies] applied robot-link masses in kilograms."""

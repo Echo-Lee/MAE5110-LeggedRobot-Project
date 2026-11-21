@@ -40,6 +40,7 @@ config_dict = {
     "Go2OscPushGlideCfg": ".go2.go2osc_config",
     "Go2OscPushGlideF075Cfg": ".go2.go2osc_config",
     "Go2OscPushGlideF050Cfg": ".go2.go2osc_config",
+    "Go2OscPushGlideRobustCfg": ".go2.go2osc_config",
 }
 
 runner_config_dict = {
@@ -59,6 +60,7 @@ runner_config_dict = {
     "Go2OscPushGlideRunnerCfg": ".go2.go2osc_config",
     "Go2OscPushGlideF075RunnerCfg": ".go2.go2osc_config",
     "Go2OscPushGlideF050RunnerCfg": ".go2.go2osc_config",
+    "Go2OscPushGlideRobustRunnerCfg": ".go2.go2osc_config",
 }
 
 task_dict = {
@@ -109,6 +111,11 @@ task_dict = {
         "Go2OscPushGlide",
         "Go2OscPushGlideF050Cfg",
         "Go2OscPushGlideF050RunnerCfg",
+    ],
+    "go2osc_push_glide_robust": [
+        "Go2OscPushGlide",
+        "Go2OscPushGlideRobustCfg",
+        "Go2OscPushGlideRobustRunnerCfg",
     ],
 }
 
