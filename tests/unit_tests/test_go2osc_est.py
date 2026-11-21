@@ -46,15 +46,15 @@ def env():
         backend.close()
 
 
-def test_task_is_registered_and_keeps_the_team_policy_inputs():
+def test_task_is_registered_and_appends_the_estimates_to_the_team_inputs():
     import gym.envs  # noqa: F401  (registers tasks)
 
     assert task_registry.get_task_class("go2osc_push_glide_est") is Go2OscPushGlideEst
     assert issubclass(Go2OscPushGlideEst, Go2OscPushGlide)
     base = go2osc_config.Go2OscPushGlideRunnerCfg
     est = configs.Go2OscPushGlideEstRunnerCfg
-    # Step 1: a go2osc_push_glide checkpoint loads unchanged.
-    assert est.actor.obs == base.actor.obs
+    # The team's inputs keep their positions; mu-hat and v-hat come after.
+    assert est.actor.obs == base.actor.obs + configs.ESTIMATE_OBSERVATIONS
     assert est.critic.obs == base.critic.obs
 
 
@@ -70,9 +70,9 @@ def test_estimator_reads_only_deployable_signals():
         assert privileged not in features
 
 
-def test_actor_and_critic_inputs_have_the_team_sizes(env):
+def test_actor_inputs_are_the_team_61_plus_four_estimates(env):
     runner_cfg = configs.Go2OscPushGlideEstRunnerCfg
-    assert env.get_states(runner_cfg.actor.obs).shape == (NUM_ENVS, 61)
+    assert env.get_states(runner_cfg.actor.obs).shape == (NUM_ENVS, 65)
     assert env.get_states(runner_cfg.critic.obs).shape == (NUM_ENVS, 70)
 
 

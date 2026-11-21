@@ -1,10 +1,14 @@
 """go2osc_push_glide_est: the push-glide task with a learned state estimator.
 
-Environment runs the estimator and
-publishes mu-hat and v-hat, but the actor and critic inputs are still the
-team's, so a go2osc_push_glide checkpoint (e.g. the 1500-iteration main policy) loads
-unchanged and the estimator can be trained and checked against it. Adding
-mu-hat and v-hat to the actor is step 2.
+The environment runs the estimator and publishes mu-hat and v-hat; the actor
+reads them after the team's inputs (ESTIMATE_OBSERVATIONS). A
+go2osc_push_glide checkpoint gains those inputs through
+scripts/widen_go2osc_policy.py, which gives them zero weights (the policy
+acts exactly as before) and stores the pretrained estimator in the same
+checkpoint, so fine-tuning is a plain resume:
+
+    uv run scripts/train.py --task go2osc_push_glide_est --resume \
+        --load_run widened_main1500 --max_iterations 500 --device cuda:0 --headless
 """
 
 from gym.envs.go2.go2_config import BASE_HEIGHT_REF
@@ -26,8 +30,10 @@ FRICTION_BIN_WEIGHTS = [0.2, 0.3, 0.4]
 # Signals the real Go2 provides: IMU (gyro, gravity direction, accelerometer),
 # joint encoders, the previous joint targets, the operator's command and the
 # controller's own oscillator phases, and the motor torques the Go2 reports
-# (stage 3: a small gain). No contact forces, no true velocity.
 ESTIMATOR_FEATURES = PHASE_OBSERVATIONS + ["base_lin_acc", "torques"]
+
+# Estimates appended to the actor's inputs: mu-hat [1] and body-frame v-hat [3].
+ESTIMATE_OBSERVATIONS = ["contact_friction_hat", "base_lin_vel_hat"]
 
 
 class Go2OscPushGlideEstCfg(Go2OscPushGlideCfg):
@@ -88,7 +94,10 @@ class Go2OscPushGlideEstCfg(Go2OscPushGlideCfg):
 
 
 class Go2OscPushGlideEstRunnerCfg(Go2OscPushGlideRunnerCfg):
-    # Actor and critic inputs unchanged until step 2.
+    class actor(Go2OscPushGlideRunnerCfg.actor):
+        # The team's inputs first (a widened checkpoint keeps their columns),
+        # then the estimates. The critic keeps its privileged inputs.
+        obs = Go2OscPushGlideRunnerCfg.actor.obs + ESTIMATE_OBSERVATIONS
 
     class runner(Go2OscPushGlideRunnerCfg.runner):
         experiment_name = "go2osc_push_glide_est"
