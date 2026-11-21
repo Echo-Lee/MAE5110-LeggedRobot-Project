@@ -10,10 +10,12 @@ Supports MuJoCo CPU/Warp and optional VSim checkpoints.
 """
 
 import argparse
+import math
 import random
 
 import torch
 
+from gym.envs.base.domain_randomization import set_domain_randomization_range
 from gym.utils.helpers import set_seed
 from gym.utils.task_registry import task_registry
 
@@ -65,6 +67,17 @@ def get_play_args(argv=None):
         "alongside keyboard teleop)",
     )
     parser.add_argument(
+        "--basic-visuals",
+        action="store_true",
+        help="Use basic MuJoCo geometry instead of optional detailed visual assets.",
+    )
+    parser.add_argument(
+        "--friction",
+        type=float,
+        default=None,
+        help="Fix ground and robot sliding friction, overriding randomization.",
+    )
+    parser.add_argument(
         "--keyboard",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -72,7 +85,14 @@ def get_play_args(argv=None):
         "gym/utils/interfaces/MujocoKeyboardInterface.py for key bindings). "
         "Use --no-keyboard to disable.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.basic_visuals and args.backend != "mujoco":
+        parser.error("--basic-visuals requires --backend mujoco")
+    if args.friction is not None and (
+        not math.isfinite(args.friction) or args.friction < 0
+    ):
+        parser.error("--friction must be finite and non-negative")
+    return args
 
 
 def setup(args):
@@ -96,6 +116,14 @@ def setup(args):
     env_cfg.init_state.reset_mode = "reset_to_basic"
     if hasattr(env_cfg, "viewer"):
         env_cfg.viewer.show_ui = args.viewer_ui
+    if args.basic_visuals:
+        env_cfg.asset.mujoco_visual_model = None
+    if args.friction is not None:
+        env_cfg.terrain.static_friction = args.friction
+        env_cfg.terrain.dynamic_friction = args.friction
+        set_domain_randomization_range(
+            env_cfg, "contact_friction_range", [args.friction, args.friction]
+        )
 
     if args.seed is not None:
         env_cfg.seed = args.seed
