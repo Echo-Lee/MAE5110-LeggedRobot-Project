@@ -10,7 +10,7 @@ estimates get zero weights, and the pretrained estimator is stored in the
 same checkpoint, so fine-tuning is a plain resume:
 
     uv run scripts/train.py --task go2osc_push_glide_est --resume \
-        --load_run widened_main1500 --max_iterations 500 --device cuda:0 --headless
+        --load_run widened_posture1800 --max_iterations 500 --device cuda:0 --headless
 """
 
 from gym.envs.go2.go2_config import BASE_HEIGHT_REF
@@ -31,13 +31,25 @@ FRICTION_BIN_WEIGHTS = [0.2, 0.3, 0.4]
 
 # Signals the real Go2 provides: IMU (gyro, gravity direction, accelerometer),
 # joint encoders, the previous joint targets, the operator's command and the
-# controller's own oscillator phases, and the motor torques the Go2 reports
-ESTIMATOR_FEATURES = PHASE_OBSERVATIONS + ["base_lin_acc", "torques"]
+# controller's own oscillator phases, and the motor torques the Go2 reports.
+# The Jacobian features turn torques and joint velocities into foot
+# forces, traction ratios and foot velocities (go2osc_est.py); they cut mu-hat
+# error from 0.161 to 0.151 (two seeds each) on the posture1800 policy.
+ESTIMATOR_FEATURES = PHASE_OBSERVATIONS + [
+    "base_lin_acc",
+    "torques",
+    "foot_force_est",
+    "foot_traction_est",
+    "foot_vel_rel_base",
+]
 
 # Estimates appended to the actor's inputs: mu-hat [1] and body-frame v-hat [3].
 ESTIMATE_OBSERVATIONS = ["contact_friction_hat", "base_lin_vel_hat"]
 # Actor inputs the real robot cannot provide; the deployable actor drops them.
 PRIVILEGED_ACTOR_OBSERVATIONS = ["foot_traction_obs"]
+# The simulator's true values the estimates stand for, same sizes and scales
+# (oracle comparison only): mu [1] and body-frame v [3].
+TRUE_STATE_OBSERVATIONS = ["contact_friction_obs", "base_lin_vel"]
 
 
 class Go2OscPushGlideEstCfg(Go2OscPushGlideCfg):
@@ -97,15 +109,45 @@ class Go2OscPushGlideEstCfg(Go2OscPushGlideCfg):
         base_lin_vel_hat = BASE_HEIGHT_REF  # same scale as base_lin_vel
 
 
+# The team's actor inputs in their order, without the privileged ones.
+DEPLOYABLE_ACTOR_OBSERVATIONS = [
+    name
+    for name in Go2OscPushGlideRunnerCfg.actor.obs
+    if name not in PRIVILEGED_ACTOR_OBSERVATIONS
+]
+
+
 class Go2OscPushGlideEstRunnerCfg(Go2OscPushGlideRunnerCfg):
     class actor(Go2OscPushGlideRunnerCfg.actor):
-        # The team's deployable inputs in their order, then the estimates.
-        # The critic keeps its privileged inputs (training only).
-        obs = [
-            name
-            for name in Go2OscPushGlideRunnerCfg.actor.obs
-            if name not in PRIVILEGED_ACTOR_OBSERVATIONS
-        ] + ESTIMATE_OBSERVATIONS
+        # The deployable inputs, then the estimates. The critic keeps its
+        # privileged inputs (training only).
+        obs = DEPLOYABLE_ACTOR_OBSERVATIONS + ESTIMATE_OBSERVATIONS
 
     class runner(Go2OscPushGlideRunnerCfg.runner):
         experiment_name = "go2osc_push_glide_est"
+
+
+# Stage 5 comparisons. Same environment as go2osc_push_glide_est (friction
+# switches, sensor noise, the estimator running and learning); only the
+# actor's inputs differ, so a difference in the fine-tuned policies comes
+# from what the actor is told.
+
+
+class Go2OscPushGlideBlindRunnerCfg(Go2OscPushGlideEstRunnerCfg):
+    """B, blind: deployable inputs only, no friction or speed information."""
+
+    class actor(Go2OscPushGlideEstRunnerCfg.actor):
+        obs = list(DEPLOYABLE_ACTOR_OBSERVATIONS)
+
+    class runner(Go2OscPushGlideEstRunnerCfg.runner):
+        experiment_name = "go2osc_push_glide_blind"
+
+
+class Go2OscPushGlideOracleRunnerCfg(Go2OscPushGlideEstRunnerCfg):
+    """Oracle: the true mu and v in place of the estimates (upper bound)."""
+
+    class actor(Go2OscPushGlideEstRunnerCfg.actor):
+        obs = DEPLOYABLE_ACTOR_OBSERVATIONS + TRUE_STATE_OBSERVATIONS
+
+    class runner(Go2OscPushGlideEstRunnerCfg.runner):
+        experiment_name = "go2osc_push_glide_oracle"

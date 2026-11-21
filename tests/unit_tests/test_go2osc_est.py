@@ -8,7 +8,7 @@ import torch
 from gym.envs.base.mujoco_cpu_backend import MuJocoCPUBackend
 from gym.envs.go2 import go2osc_config, go2osc_est_config as configs
 from gym.envs.go2.go2osc import Go2OscPushGlide
-from gym.envs.go2.go2osc_est import Go2OscPushGlideEst
+from gym.envs.go2.go2osc_est import JACOBIAN_FEATURES, Go2OscPushGlideEst
 from gym.utils.task_registry import task_registry
 from learning.modules.history_estimator import FRICTION_CLIP, HistoryStateEstimator
 
@@ -304,6 +304,35 @@ def test_foot_velocity_relative_to_base_matches_the_simulator(env):
     torch.testing.assert_close(env.foot_vel_rel_base, expected, atol=1e-4, rtol=1e-3)
 
 
+def test_blind_and_oracle_differ_from_the_est_task_only_in_actor_inputs():
+    import gym.envs  # noqa: F401  (registers tasks)
+
+    est = configs.Go2OscPushGlideEstRunnerCfg
+    deployable = [n for n in est.actor.obs if n not in configs.ESTIMATE_OBSERVATIONS]
+    blind = configs.Go2OscPushGlideBlindRunnerCfg
+    oracle = configs.Go2OscPushGlideOracleRunnerCfg
+    assert blind.actor.obs == deployable
+    assert oracle.actor.obs == deployable + configs.TRUE_STATE_OBSERVATIONS
+    for name, runner in (
+        ("go2osc_push_glide_blind", blind),
+        ("go2osc_push_glide_oracle", oracle),
+    ):
+        assert task_registry.get_task_class(name) is Go2OscPushGlideEst
+        env_cfg, train_cfg = task_registry.get_cfgs(name)
+        assert isinstance(env_cfg, configs.Go2OscPushGlideEstCfg)
+        assert train_cfg.critic.obs == est.critic.obs
+        assert train_cfg.runner.experiment_name != est.runner.experiment_name
+    assert "foot_traction_obs" not in oracle.actor.obs
+
+
+def test_oracle_inputs_match_the_estimates_in_size_and_scale(env):
+    true = configs.TRUE_STATE_OBSERVATIONS
+    estimates = configs.ESTIMATE_OBSERVATIONS
+    for t, e in zip(true, estimates):
+        assert env.get_states([t]).shape == env.get_states([e]).shape
+        assert env.scales[t] == env.scales[e]
+
+
 def test_estimator_inputs_are_clean_without_sensor_noise(env):
     env.sensor_noise_enabled = False
     torch.testing.assert_close(
@@ -321,7 +350,7 @@ def test_sensor_noise_hits_only_the_noisy_sensors_at_their_scale(env):
     noise = configs.Go2OscPushGlideEstCfg.state_estimator.sensor_noise.std
     for name in env.estimator_features:
         part = diff[..., offset : offset + dims[name]]
-        if name in noise:
+        if name in noise or name in JACOBIAN_FEATURES:  # via torques, dof_vel
             assert part.std().item() > 0
         else:
             assert torch.all(part == 0), name
@@ -333,6 +362,39 @@ def test_sensor_noise_hits_only_the_noisy_sensors_at_their_scale(env):
     torch.testing.assert_close(
         acc.mean(dim=0), env.accelerometer_bias, atol=4 * expected / 20, rtol=0
     )
+
+
+def test_jacobian_features_carry_the_same_noise_as_the_torques_and_velocities():
+    jacobian = ["foot_force_est", "foot_traction_est", "foot_vel_rel_base"]
+
+    def edit(cfg):
+        cfg.state_estimator.features = configs.ESTIMATOR_FEATURES + jacobian
+
+    task, _, backend = _make(edit)
+    try:
+        task.step()
+        torch.manual_seed(0)
+        inputs = task._estimator_inputs()
+        part = {n: inputs[:, task._feature_slices[n]] for n in task.estimator_features}
+        scale = {
+            n: torch.as_tensor(task.scales.get(n, 1.0), dtype=torch.float)
+            for n in ("torques", "dof_vel")
+        }
+        # Recomputed from the noisy torques and velocities the estimator sees.
+        force, ratio, velocity = task._leg_features(
+            part["torques"] * scale["torques"], part["dof_vel"] * scale["dof_vel"]
+        )
+        for name, value in zip(jacobian, (force, ratio, velocity)):
+            torch.testing.assert_close(part[name], value, atol=1e-5, rtol=1e-4)
+        # ... and not the clean values.
+        assert not torch.allclose(part["foot_force_est"], task.foot_force_est)
+        assert not torch.allclose(part["foot_vel_rel_base"], task.foot_vel_rel_base)
+        task.sensor_noise_enabled = False
+        torch.testing.assert_close(
+            task._estimator_inputs(), task.get_states(task.estimator_features)
+        )
+    finally:
+        backend.close()
 
 
 def test_accelerometer_bias_is_constant_per_episode_and_resampled_on_reset(env):

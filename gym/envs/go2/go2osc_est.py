@@ -32,6 +32,8 @@ JACOBIAN_DAMPING = 0.01
 # Forces are in body weights; clip swing-phase and near-singular spikes.
 FOOT_FORCE_CLIP = 3.0
 TRACTION_RATIO_CLIP = 2.0
+# Estimator inputs computed from the joint torques and velocities.
+JACOBIAN_FEATURES = ("foot_force_est", "foot_traction_est", "foot_vel_rel_base")
 
 
 class Go2OscPushGlideEst(Go2OscPushGlide):
@@ -128,9 +130,21 @@ class Go2OscPushGlideEst(Go2OscPushGlide):
         return columns.transpose(-1, -2), lever  # J[..., i, j]: row i, joint j
 
     def _refresh_leg_kinematics(self):
-        jacobian, lever = self._leg_jacobians()
+        self._leg_jacobian, self._leg_lever = self._leg_jacobians()
+        force, ratio, velocity = self._leg_features(self.torques, self.dof_vel)
+        self.foot_force_est = force
+        self.foot_traction_est = ratio
+        self.foot_vel_rel_base = velocity
+
+    def _leg_features(self, torques, dof_vel):
+        """(foot force [N, 12], traction ratio [N, 8], foot velocity [N, 12]).
+
+        From joint torques and velocities [N, 12] with the Jacobians of the
+        last _refresh_leg_kinematics; sensor noise passes in through them.
+        """
+        jacobian, lever = self._leg_jacobian, self._leg_lever
         n = self.num_envs
-        tau = self.torques.view(n, 4, 3).unsqueeze(-1)
+        tau = torques.view(n, 4, 3).unsqueeze(-1)
         # tau_motor + J^T F_ground = 0 (static leg): F = -J (J^T J + l^2 I)^-1 tau
         damping = JACOBIAN_DAMPING**2 * torch.eye(3, device=self.device)
         gram = jacobian.transpose(-1, -2) @ jacobian + damping
@@ -143,12 +157,10 @@ class Go2OscPushGlideEst(Go2OscPushGlide):
             -TRACTION_RATIO_CLIP, TRACTION_RATIO_CLIP
         )
         ratio = torch.where(loaded.unsqueeze(-1), ratio, torch.zeros_like(ratio))
-        qdot = self.dof_vel.view(n, 4, 3).unsqueeze(-1)
+        qdot = dof_vel.view(n, 4, 3).unsqueeze(-1)
         omega = self.base_ang_vel.unsqueeze(1).expand(n, 4, 3)
         velocity = torch.cross(omega, lever, dim=-1) + (jacobian @ qdot).squeeze(-1)
-        self.foot_force_est = force.reshape(n, 12)
-        self.foot_traction_est = ratio.reshape(n, 8)
-        self.foot_vel_rel_base = velocity.reshape(n, 12)
+        return force.reshape(n, 12), ratio.reshape(n, 8), velocity.reshape(n, 12)
 
     # ------------------------------------------------------------------
     # Accelerometer
@@ -308,7 +320,9 @@ class Go2OscPushGlideEst(Go2OscPushGlide):
         std = getattr(settings, "std", {}) if settings else {}
         dims = self._feature_dims(self.estimator_features)
         pieces, offset, self._acc_slice = [], 0, None
+        self._feature_slices = {}
         for name, dim in zip(self.estimator_features, dims):
+            self._feature_slices[name] = slice(offset, offset + dim)
             value = torch.full((dim,), float(std.get(name, 0.0)), device=self.device)
             if name in self.scales:
                 value = value / torch.as_tensor(
@@ -335,14 +349,46 @@ class Go2OscPushGlideEst(Go2OscPushGlide):
         )
 
     def _estimator_inputs(self):
-        """The estimator's input frame: clean features plus sensor noise."""
+        """The estimator's input frame: clean features plus sensor noise.
+
+        The Jacobian features are recomputed from the noisy torques and joint
+        velocities, with the same noise draw as those inputs, so they carry
+        the sensors' noise instead of a clean copy of it. Encoder angle noise
+        (0.01 rad) would shift the Jacobian by millimetres and is left out.
+        """
         features = self.get_states(self.estimator_features)
         if not self.sensor_noise_enabled:
             return features
-        features = features + self._sensor_noise_std * torch.randn_like(features)
+        noise = self._sensor_noise_std * torch.randn_like(features)
+        features = features + noise
         if self._acc_slice is not None:
             features[:, self._acc_slice] += self.accelerometer_bias
+        if any(name in self._feature_slices for name in JACOBIAN_FEATURES):
+            torques = self.torques + self._physical_noise("torques", noise)
+            dof_vel = self.dof_vel + self._physical_noise("dof_vel", noise)
+            noisy = dict(zip(JACOBIAN_FEATURES, self._leg_features(torques, dof_vel)))
+            for name in JACOBIAN_FEATURES:
+                if name in self._feature_slices:
+                    value = noisy[name]
+                    if name in self.scales:
+                        value = value / torch.as_tensor(
+                            self.scales[name], dtype=torch.float, device=self.device
+                        )
+                    features[:, self._feature_slices[name]] = value
         return features
+
+    def _physical_noise(self, name, noise):
+        """Noise on ``name`` in physical units: the draw already applied to that
+        estimator input if it is one, else a fresh draw with the config std."""
+        if name in self._feature_slices:
+            value = noise[:, self._feature_slices[name]]
+            if name in self.scales:
+                value = value * torch.as_tensor(
+                    self.scales[name], dtype=torch.float, device=self.device
+                )
+            return value
+        std = getattr(self.cfg.state_estimator.sensor_noise, "std", {})
+        return float(std.get(name, 0.0)) * torch.randn_like(getattr(self, name))
 
     def _load_estimator_model(self, settings):
         """(initial estimator, untrained?): the configured file, else untrained."""

@@ -7,12 +7,22 @@ rollout. The pretrained estimator rides in the same checkpoint, so
 fine-tuning is a plain resume:
 
     uv run scripts/widen_go2osc_policy.py \
-        --policy-dir logs/go2osc_main1500/go2osc_push_glide \
-        --estimator logs/go2osc_push_glide_est/pretrain_main1500_noise/estimator.pt
+        --policy-dir logs/go2osc_posture1800/go2osc_push_glide \
+        --estimator logs/go2osc_push_glide_est/pretrain_posture1800_noise_jacobian_s1/estimator.pt
     uv run scripts/train.py --task go2osc_push_glide_est --resume \
-        --load_run widened_main1500 --max_iterations 500 --device cuda:0 --headless
+        --load_run widened_posture1800 --max_iterations 500 --device cuda:0 --headless
 
-Writes logs/go2osc_push_glide_est/<run_name>/model_<iter>.pt and widen.json.
+Writes logs/<experiment>/<run_name>/model_<iter>.pt and widen.json. The
+stage 5 comparisons start the same way (same policy, estimator and run name):
+
+    uv run scripts/widen_go2osc_policy.py --task go2osc_push_glide_blind
+    uv run scripts/widen_go2osc_policy.py --task go2osc_push_glide_oracle
+    uv run scripts/train.py --task go2osc_push_glide_blind --resume \
+        --load_run widened_posture1800 --max_iterations 500 --device cuda:0 --headless
+
+Blind only drops foot_traction_obs; the oracle gets the true mu and v
+(contact_friction_obs, base_lin_vel) with zero weights instead of the
+estimates.
 """
 
 import argparse
@@ -34,23 +44,28 @@ from gym.utils.task_registry import task_registry  # noqa: E402
 from learning.modules import Actor  # noqa: E402
 from learning.modules.input_widening import widen_actor_state  # noqa: E402
 
-TASK = "go2osc_push_glide_est"
+TASKS = (
+    "go2osc_push_glide_est",
+    "go2osc_push_glide_blind",
+    "go2osc_push_glide_oracle",
+)
 
 
 def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--task", choices=TASKS, default=TASKS[0])
     parser.add_argument(
         "--policy-dir",
         type=Path,
-        default=ROOT / "logs/go2osc_main1500/go2osc_push_glide",
+        default=ROOT / "logs/go2osc_posture1800/go2osc_push_glide",
     )
     parser.add_argument(
         "--estimator",
         type=Path,
         default=ROOT
-        / "logs/go2osc_push_glide_est/pretrain_main1500_noise/estimator.pt",
+        / "logs/go2osc_push_glide_est/pretrain_posture1800_noise_jacobian_s1/estimator.pt",
     )
-    parser.add_argument("--run_name", default="widened_main1500")
+    parser.add_argument("--run_name", default="widened_posture1800")
     parser.add_argument("--num_envs", type=int, default=256)
     parser.add_argument("--stats_steps", type=int, default=300)
     parser.add_argument("--seed", type=int, default=0)
@@ -68,7 +83,7 @@ def load_policy(policy_dir):
 
 
 def make(args, output):
-    cfg, train_cfg = task_registry.get_cfgs(TASK)
+    cfg, train_cfg = task_registry.get_cfgs(args.task)
     cfg.env.num_envs = args.num_envs
     cfg.seed = train_cfg.seed = args.seed
     cfg.state_estimator.init_path = str(args.estimator.resolve())
@@ -80,7 +95,7 @@ def make(args, output):
     set_seed(args.seed)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        env = task_registry.make_env(TASK, cfg, device="cpu", headless=True)
+        env = task_registry.make_env(args.task, cfg, device="cpu", headless=True)
     runner = task_registry.make_alg_runner(env, train_cfg)
     return env, runner
 
@@ -88,7 +103,8 @@ def make(args, output):
 def main():
     args = arguments()
     old, metadata = load_policy(args.policy_dir)
-    output = ROOT / "logs" / "go2osc_push_glide_est" / args.run_name
+    _, train_cfg = task_registry.get_cfgs(args.task)
+    output = ROOT / "logs" / train_cfg.runner.experiment_name / args.run_name
     if output.exists() and any(output.glob("model_*.pt")):
         raise FileExistsError(f"{output} already holds a checkpoint")
     env, runner = make(args, output)
@@ -157,6 +173,7 @@ def main():
     runner.save()  # fresh actor optimizer, old critic optimizer, estimator
 
     info = {
+        "task": args.task,
         "source_policy": str(args.policy_dir),
         "source_sha256": metadata["sha256"],
         "estimator": str(args.estimator),
