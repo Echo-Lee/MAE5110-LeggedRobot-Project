@@ -58,3 +58,27 @@ def test_dropping_or_resizing_an_input_is_refused():
         widen_actor_state(state, OLD, [("a", 3), ("c", 2)])
     with pytest.raises(ValueError, match="size"):
         widen_actor_state(state, OLD, [("a", 3), ("b", 3)])
+
+
+def test_dropping_an_input_equals_feeding_the_original_its_running_mean():
+    old = _trained_actor(5)
+    state = old.state_dict()
+    new_inputs = [("a", 3), ("mu_hat", 1)]  # drop "b", add "mu_hat"
+    narrow = Actor(4, 4, hidden_dims=[16, 8], activation="elu").eval()
+    narrow.load_state_dict(widen_actor_state(state, OLD, new_inputs, drop=["b"]))
+    obs_a = torch.randn(32, 3)
+    b_mean = state["obs_rms.running_mean"][3:5].float().expand(32, 2)
+    torch.testing.assert_close(
+        narrow.act_inference(torch.cat((obs_a, 5 * torch.randn(32, 1)), dim=1)),
+        old.act_inference(torch.cat((obs_a, b_mean), dim=1)),
+    )
+
+
+def test_only_explicitly_listed_inputs_can_be_dropped():
+    state = _trained_actor(5).state_dict()
+    with pytest.raises(ValueError, match="not in drop"):
+        widen_actor_state(state, OLD, [("a", 3)])
+    with pytest.raises(ValueError, match="lacks"):
+        widen_actor_state(state, OLD, [("a", 3)], drop=["b", "zzz"])
+    with pytest.raises(ValueError, match="still listed"):
+        widen_actor_state(state, OLD, OLD, drop=["b"])

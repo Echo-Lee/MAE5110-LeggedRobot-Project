@@ -26,7 +26,9 @@ sys.path.insert(0, str(ROOT))
 
 import gym.envs  # noqa: E402, F401
 from gym.utils.helpers import set_seed  # noqa: E402
+from gym.envs.go2.go2osc_config import Go2OscPushGlideRunnerCfg  # noqa: E402
 from gym.utils.task_registry import task_registry  # noqa: E402
+from learning.modules.input_widening import widen_actor_state  # noqa: E402
 
 TASK = "go2osc_push_glide_est"
 # Histories right after a reset hold copies of the reset frame; skip them.
@@ -55,6 +57,12 @@ def arguments():
         help="Train and evaluate on clean sensors (stages 2-4 did)",
     )
     parser.add_argument(
+        "--features",
+        nargs="+",
+        default=None,
+        help="Exact estimator inputs, replacing the config default",
+    )
+    parser.add_argument(
         "--extra_features",
         nargs="*",
         default=[],
@@ -81,13 +89,21 @@ def make(args, checkpoint):
     cfg.seed = train_cfg.seed = args.seed
     settings = cfg.state_estimator
     settings.init_path = None
-    settings.features = list(settings.features) + list(args.extra_features)
+    base = args.features if args.features else settings.features
+    settings.features = list(base) + list(args.extra_features)
     settings.sensor_noise.enabled = not args.no_sensor_noise
     settings.samples_per_step = args.samples_per_step
     settings.update_interval = args.update_interval
     settings.gradient_steps = args.gradient_steps
     settings.learning_rate = args.learning_rate
     train_cfg.runner.device = args.device
+    # The frozen walker is the original policy, exactly: its own inputs
+    # (foot_traction_obs included) plus zero-weight estimate inputs.
+    train_cfg.actor.obs = list(Go2OscPushGlideRunnerCfg.actor.obs) + [
+        name
+        for name in train_cfg.actor.obs
+        if name not in Go2OscPushGlideRunnerCfg.actor.obs
+    ]
     train_cfg.logging.enable_local_saving = False
     train_cfg.log_dir = None
     task_registry.convert_frequencies_to_params(cfg, train_cfg)
@@ -98,9 +114,33 @@ def make(args, checkpoint):
             TASK, cfg, device=args.device, headless=True, backend="mujoco"
         )
     runner = task_registry.make_alg_runner(env, train_cfg)
-    runner.load(str(checkpoint), load_optimizer=False)
+    load_widened(env, runner, checkpoint)
     runner.switch_to_eval()  # also turns estimator learning off
     return env, runner
+
+
+def load_widened(env, runner, checkpoint):
+    """Load a go2osc_push_glide policy into the runner's actor.
+
+    Estimate inputs get zero weights and inputs the runner's actor lacks are
+    dropped (widen_actor_state). Pretraining keeps every original input, so
+    there the policy walks exactly as the original; only the estimator learns.
+    """
+    saved = torch.load(checkpoint, map_location=runner.device, weights_only=True)
+    names = list(runner.actor_cfg["obs"])
+    old_names = list(Go2OscPushGlideRunnerCfg.actor.obs)
+    dims = {n: env.get_states([n]).shape[1] for n in set(names) | set(old_names)}
+    actor = saved["actor_state_dict"]
+    if names != old_names:
+        actor = widen_actor_state(
+            actor,
+            [(n, dims[n]) for n in old_names],
+            [(n, dims[n]) for n in names],
+            drop=[n for n in old_names if n not in names],
+        )
+    runner.alg.actor.load_state_dict(actor)
+    runner.alg.critic.load_state_dict(saved["critic_state_dict"])
+    runner.it = int(saved["iter"])
 
 
 def act(env, runner):

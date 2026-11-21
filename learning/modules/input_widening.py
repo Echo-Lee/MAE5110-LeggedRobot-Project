@@ -1,9 +1,12 @@
-"""Give a trained actor new inputs without changing what it does.
+"""Give a trained actor new inputs, or remove some, without retraining.
 
 The first layer gets zero weights for the new input columns, so the widened
 actor's actions are identical to the original's whatever the new inputs
-read. Its running input normalization keeps the old statistics; the new
-columns take statistics measured from data (``new_stats``), because a
+read. Inputs listed in ``drop`` lose their columns; since the actor
+normalizes each input first, that is exactly the original actor fed the
+dropped input's running mean. The running input normalization keeps the
+old statistics; the new columns take statistics measured from data
+(``new_stats``), because a
 normalizer that has already counted millions of samples would barely move
 for them during fine-tuning.
 """
@@ -22,21 +25,31 @@ def input_columns(names, dims):
     return columns
 
 
-def widen_actor_state(state, old_inputs, new_inputs, new_stats=None):
+def widen_actor_state(state, old_inputs, new_inputs, new_stats=None, drop=()):
     """Copy of an actor ``state_dict`` taking ``new_inputs``.
 
     ``old_inputs`` and ``new_inputs`` are lists of (name, dim). Every old
-    input must appear in the new list with the same size, in any position.
-    ``new_stats`` maps an added input's name to (mean, var) tensors.
+    input not named in ``drop`` must appear in the new list with the same
+    size, in any position. ``new_stats`` maps an added input's name to
+    (mean, var) tensors.
     """
     old_names = [name for name, _ in old_inputs]
     new_names = [name for name, _ in new_inputs]
     old_cols = input_columns(old_names, [dim for _, dim in old_inputs])
     new_cols = input_columns(new_names, [dim for _, dim in new_inputs])
-    missing = set(old_names) - set(new_names)
+    drop = set(drop)
+    unknown = drop - set(old_names)
+    if unknown:
+        raise ValueError(f"cannot drop inputs the actor lacks: {sorted(unknown)}")
+    if drop & set(new_names):
+        raise ValueError(
+            f"dropped inputs are still listed: {sorted(drop & set(new_names))}"
+        )
+    missing = set(old_names) - set(new_names) - drop
     if missing:
-        raise ValueError(f"cannot drop actor inputs {sorted(missing)}")
-    for name in old_names:
+        raise ValueError(f"cannot drop actor inputs {sorted(missing)} (not in drop)")
+    kept = [name for name in old_names if name not in drop]
+    for name in kept:
         if old_cols[name][1] - old_cols[name][0] != (
             new_cols[name][1] - new_cols[name][0]
         ):
@@ -52,7 +65,7 @@ def widen_actor_state(state, old_inputs, new_inputs, new_stats=None):
     if has_rms:
         mean = torch.zeros(width, dtype=state["obs_rms.running_mean"].dtype)
         var = torch.ones(width, dtype=state["obs_rms.running_var"].dtype)
-    for name in old_names:
+    for name in kept:
         (a, b), (c, d) = old_cols[name], new_cols[name]
         new_weight[:, c:d] = weight[:, a:b]
         if has_rms:

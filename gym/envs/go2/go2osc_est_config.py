@@ -1,11 +1,13 @@
 """go2osc_push_glide_est: the push-glide task with a learned state estimator.
 
-The environment runs the estimator and publishes mu-hat and v-hat; the actor
-reads them after the team's inputs (ESTIMATE_OBSERVATIONS). A
-go2osc_push_glide checkpoint gains those inputs through
-scripts/widen_go2osc_policy.py, which gives them zero weights (the policy
-acts exactly as before) and stores the pretrained estimator in the same
-checkpoint, so fine-tuning is a plain resume:
+The environment runs the estimator and publishes mu-hat and v-hat. The
+actor is deployable: it reads the team's inputs without the privileged
+foot_traction_obs (true contact-force ratios), then the estimates
+(ESTIMATE_OBSERVATIONS). scripts/widen_go2osc_policy.py converts a
+go2osc_push_glide checkpoint: the traction columns are removed (the same as
+feeding their mean, about 0; test 2 showed the policy barely uses them), the
+estimates get zero weights, and the pretrained estimator is stored in the
+same checkpoint, so fine-tuning is a plain resume:
 
     uv run scripts/train.py --task go2osc_push_glide_est --resume \
         --load_run widened_main1500 --max_iterations 500 --device cuda:0 --headless
@@ -34,6 +36,8 @@ ESTIMATOR_FEATURES = PHASE_OBSERVATIONS + ["base_lin_acc", "torques"]
 
 # Estimates appended to the actor's inputs: mu-hat [1] and body-frame v-hat [3].
 ESTIMATE_OBSERVATIONS = ["contact_friction_hat", "base_lin_vel_hat"]
+# Actor inputs the real robot cannot provide; the deployable actor drops them.
+PRIVILEGED_ACTOR_OBSERVATIONS = ["foot_traction_obs"]
 
 
 class Go2OscPushGlideEstCfg(Go2OscPushGlideCfg):
@@ -95,9 +99,13 @@ class Go2OscPushGlideEstCfg(Go2OscPushGlideCfg):
 
 class Go2OscPushGlideEstRunnerCfg(Go2OscPushGlideRunnerCfg):
     class actor(Go2OscPushGlideRunnerCfg.actor):
-        # The team's inputs first (a widened checkpoint keeps their columns),
-        # then the estimates. The critic keeps its privileged inputs.
-        obs = Go2OscPushGlideRunnerCfg.actor.obs + ESTIMATE_OBSERVATIONS
+        # The team's deployable inputs in their order, then the estimates.
+        # The critic keeps its privileged inputs (training only).
+        obs = [
+            name
+            for name in Go2OscPushGlideRunnerCfg.actor.obs
+            if name not in PRIVILEGED_ACTOR_OBSERVATIONS
+        ] + ESTIMATE_OBSERVATIONS
 
     class runner(Go2OscPushGlideRunnerCfg.runner):
         experiment_name = "go2osc_push_glide_est"

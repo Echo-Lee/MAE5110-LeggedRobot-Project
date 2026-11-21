@@ -1,8 +1,9 @@
 """Turn a go2osc_push_glide policy into a go2osc_push_glide_est starting point.
 
-The actor gains the estimate inputs (mu-hat, v-hat) with zero weights, so
-it acts exactly as before; their input normalization is measured from a
-short rollout. The pretrained estimator rides in the same checkpoint, so
+The actor gains the estimate inputs (mu-hat, v-hat) with zero weights and
+loses the privileged foot_traction_obs (equivalent to feeding its running
+mean, about 0); the estimates' input normalization is measured from a short
+rollout. The pretrained estimator rides in the same checkpoint, so
 fine-tuning is a plain resume:
 
     uv run scripts/widen_go2osc_policy.py \
@@ -94,13 +95,17 @@ def main():
 
     old_names = list(Go2OscPushGlideRunnerCfg.actor.obs)
     new_names = list(runner.actor_cfg["obs"])
-    dims = {name: env.get_states([name]).shape[1] for name in new_names}
+    dims = {n: env.get_states([n]).shape[1] for n in set(old_names) | set(new_names)}
     old_inputs = [(name, dims[name]) for name in old_names]
     new_inputs = [(name, dims[name]) for name in new_names]
     added = [name for name in new_names if name not in old_names]
+    dropped = [name for name in old_names if name not in new_names]
 
-    # Zero-weight widening first: the rollout below then runs the old policy.
-    widened = widen_actor_state(old["actor_state_dict"], old_inputs, new_inputs)
+    # Zero-weight estimates and dropped columns: the rollout below runs the
+    # original policy fed the dropped inputs' running means.
+    widened = widen_actor_state(
+        old["actor_state_dict"], old_inputs, new_inputs, drop=dropped
+    )
     runner.alg.actor.load_state_dict(widened)
     runner.alg.critic.load_state_dict(old["critic_state_dict"])
     runner.alg.critic_optimizer.load_state_dict(old["critic_optimizer_state_dict"])
@@ -113,13 +118,24 @@ def main():
     ).eval()
     reference.load_state_dict(old["actor_state_dict"])
 
-    samples, max_diff = {name: [] for name in added}, 0.0
+    rms_mean = old["actor_state_dict"]["obs_rms.running_mean"].float()
+    columns, start = {}, 0
+    for name, dim in old_inputs:
+        columns[name] = slice(start, start + dim)
+        start += dim
+    samples, max_diff, max_drop_effect = {name: [] for name in added}, 0.0, 0.0
     with torch.no_grad():
         for step in range(args.stats_steps):
             obs = runner.get_obs(runner.actor_cfg["obs"])
             actions = runner.alg.actor.act_inference(obs)
-            expected = reference.act_inference(runner.get_obs(old_names))
+            original_obs = runner.get_obs(old_names)
+            mean_fed = original_obs.clone()
+            for name in dropped:  # dropping == feeding the running mean
+                mean_fed[:, columns[name]] = rms_mean[columns[name]]
+            expected = reference.act_inference(mean_fed)
             max_diff = max(max_diff, (actions - expected).abs().max().item())
+            effect = actions - reference.act_inference(original_obs)
+            max_drop_effect = max(max_drop_effect, effect.abs().mean().item())
             runner.set_actions(
                 runner.actor_cfg["actions"],
                 actions,
@@ -134,7 +150,7 @@ def main():
         data = torch.cat(samples[name])
         stats[name] = (data.mean(dim=0), data.var(dim=0).clamp_min(1e-6))
     widened = widen_actor_state(
-        old["actor_state_dict"], old_inputs, new_inputs, new_stats=stats
+        old["actor_state_dict"], old_inputs, new_inputs, new_stats=stats, drop=dropped
     )
     runner.alg.actor.load_state_dict(widened)
     runner.it = int(old["iter"])
@@ -151,7 +167,9 @@ def main():
             name: {"mean": m.tolist(), "var": v.tolist()}
             for name, (m, v) in stats.items()
         },
-        "max_action_difference_vs_original": max_diff,
+        "dropped_inputs": dropped,
+        "max_action_difference_vs_original_fed_dropped_means": max_diff,
+        "max_mean_action_change_from_dropping": max_drop_effect,
     }
     (output / "widen.json").write_text(json.dumps(info, indent=2))
     env._backend.close()
@@ -159,7 +177,9 @@ def main():
         json.dumps({k: info[k] for k in ("iteration", "added_input_stats")}, indent=1)
     )
     print(
-        f"max |action - original action| over {args.stats_steps} steps: {max_diff:.2e}"
+        f"max |action - original fed dropped means| over {args.stats_steps} steps: "
+        f"{max_diff:.2e}; dropped {dropped}, largest mean action change "
+        f"{max_drop_effect:.3f}"
     )
     print(f"saved {output / f'model_{runner.it}.pt'}")
 
