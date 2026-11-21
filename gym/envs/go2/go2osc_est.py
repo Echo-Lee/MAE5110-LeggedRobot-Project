@@ -268,6 +268,7 @@ class Go2OscPushGlideEst(Go2OscPushGlide):
                 model.input_mean.numel(), dtype=torch.bool, device=self.device
             )
         self.estimator_features = model.config["features"]
+        self._init_sensor_noise()
         self.estimator = ConcurrentEstimator(
             model,
             self.num_envs,
@@ -287,6 +288,61 @@ class Go2OscPushGlideEst(Go2OscPushGlide):
 
     def _feature_dims(self, features):
         return [self.get_states([name]).shape[1] for name in features]
+
+    # ------------------------------------------------------------------
+    # Sensor noise on the estimator's inputs
+    # ------------------------------------------------------------------
+    def _init_sensor_noise(self):
+        """Per-input Gaussian noise std and the accelerometer-bias slot.
+
+        ``state_estimator.sensor_noise`` gives a std per sensor in physical
+        units (m/s^2, rad, rad/s, N m); they are converted to the scaled
+        units get_states returns. The accelerometer also gets a constant
+        bias per episode and axis, uniform in +-accelerometer_bias, as a real
+        IMU's offset drifts between power-ups. Only the estimator's inputs
+        are perturbed; the policy's observations keep the runner's noise.
+        ``sensor_noise_enabled`` turns it off (e.g. for clean evaluation).
+        """
+        settings = getattr(self.cfg.state_estimator, "sensor_noise", None)
+        self.sensor_noise_enabled = bool(settings and settings.enabled)
+        std = getattr(settings, "std", {}) if settings else {}
+        dims = self._feature_dims(self.estimator_features)
+        pieces, offset, self._acc_slice = [], 0, None
+        for name, dim in zip(self.estimator_features, dims):
+            value = torch.full((dim,), float(std.get(name, 0.0)), device=self.device)
+            if name in self.scales:
+                value = value / torch.as_tensor(
+                    self.scales[name], dtype=torch.float, device=self.device
+                )
+            pieces.append(value)
+            if name == "base_lin_acc":
+                self._acc_slice = slice(offset, offset + dim)
+            offset += dim
+        self._sensor_noise_std = torch.cat(pieces)
+        bias = getattr(settings, "accelerometer_bias", 0.0) if settings else 0.0
+        self._acc_bias_limit = float(bias) / GRAVITY_M_S2  # in g, like the feature
+        self.accelerometer_bias = torch.zeros(self.num_envs, 3, device=self.device)
+        self._resample_accelerometer_bias(
+            torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        )
+
+    def _resample_accelerometer_bias(self, mask):
+        drawn = (2 * torch.rand(self.num_envs, 3, device=self.device) - 1) * (
+            self._acc_bias_limit
+        )
+        self.accelerometer_bias = torch.where(
+            mask.unsqueeze(1), drawn, self.accelerometer_bias
+        )
+
+    def _estimator_inputs(self):
+        """The estimator's input frame: clean features plus sensor noise."""
+        features = self.get_states(self.estimator_features)
+        if not self.sensor_noise_enabled:
+            return features
+        features = features + self._sensor_noise_std * torch.randn_like(features)
+        if self._acc_slice is not None:
+            features[:, self._acc_slice] += self.accelerometer_bias
+        return features
 
     def _load_estimator_model(self, settings):
         """(initial estimator, untrained?): the configured file, else untrained."""
@@ -346,7 +402,7 @@ class Go2OscPushGlideEst(Go2OscPushGlide):
         self._apply_friction_switch()
         self._refresh_leg_kinematics()
         self.estimator.step(
-            self.get_states(self.estimator_features),
+            self._estimator_inputs(),
             targets_from_env(self),
             self.estimator_noise_std,
         )
@@ -369,7 +425,8 @@ class Go2OscPushGlideEst(Go2OscPushGlide):
         self._sample_friction_switches(reset_mask)
         self.time_since_friction_change.masked_fill_(reset_mask, 0.0)
         self._refresh_leg_kinematics()
-        self.estimator.reset(reset_mask, self.get_states(self.estimator_features))
+        self._resample_accelerometer_bias(reset_mask)
+        self.estimator.reset(reset_mask, self._estimator_inputs())
         self._publish_estimate()
 
     # ------------------------------------------------------------------
@@ -403,6 +460,7 @@ class Go2OscPushGlideEst(Go2OscPushGlide):
         if new_inputs is None:  # same architecture: keep Adam's moments
             self.estimator.optimizer.load_state_dict(saved["optimizer"])
         self.estimator_features = model.config["features"]
+        self._init_sensor_noise()
         everyone = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
-        self.estimator.reset(everyone, self.get_states(self.estimator_features))
+        self.estimator.reset(everyone, self._estimator_inputs())
         self._publish_estimate()

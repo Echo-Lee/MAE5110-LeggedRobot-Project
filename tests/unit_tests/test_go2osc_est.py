@@ -298,3 +298,48 @@ def test_foot_velocity_relative_to_base_matches_the_simulator(env):
         env.base_quat.repeat_interleave(4, dim=0), relative.reshape(-1, 3)
     ).view(n, 12)
     torch.testing.assert_close(env.foot_vel_rel_base, expected, atol=1e-4, rtol=1e-3)
+
+
+def test_estimator_inputs_are_clean_without_sensor_noise(env):
+    env.sensor_noise_enabled = False
+    torch.testing.assert_close(
+        env._estimator_inputs(), env.get_states(env.estimator_features)
+    )
+
+
+def test_sensor_noise_hits_only_the_noisy_sensors_at_their_scale(env):
+    torch.manual_seed(0)
+    clean = env.get_states(env.estimator_features)
+    noisy = torch.stack([env._estimator_inputs() for _ in range(400)])
+    diff = noisy - clean
+    dims = dict(zip(env.estimator_features, env._feature_dims(env.estimator_features)))
+    offset = 0
+    noise = configs.Go2OscPushGlideEstCfg.state_estimator.sensor_noise.std
+    for name in env.estimator_features:
+        part = diff[..., offset : offset + dims[name]]
+        if name in noise:
+            assert part.std().item() > 0
+        else:
+            assert torch.all(part == 0), name
+        offset += dims[name]
+    # Accelerometer: std 0.5 m/s^2 in units of g, plus a constant bias.
+    acc = diff[..., env._acc_slice]
+    expected = noise["base_lin_acc"] / 9.81
+    assert acc.std(dim=0).mean().item() == pytest.approx(expected, rel=0.15)
+    torch.testing.assert_close(
+        acc.mean(dim=0), env.accelerometer_bias, atol=4 * expected / 20, rtol=0
+    )
+
+
+def test_accelerometer_bias_is_constant_per_episode_and_resampled_on_reset(env):
+    limit = configs.Go2OscPushGlideEstCfg.state_estimator.sensor_noise
+    bound = limit.accelerometer_bias / 9.81
+    before = env.accelerometer_bias.clone()
+    assert torch.all(before.abs() <= bound)
+    for _ in range(3):
+        env.step()
+    torch.testing.assert_close(env.accelerometer_bias, before)
+    mask = torch.tensor([True, False, True, False])
+    env._reset_idx(mask)
+    assert not torch.allclose(env.accelerometer_bias[mask], before[mask])
+    torch.testing.assert_close(env.accelerometer_bias[~mask], before[~mask])

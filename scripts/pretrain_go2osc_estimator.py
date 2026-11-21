@@ -5,7 +5,7 @@ inside go2osc_push_glide_est trains on the true friction and body velocity
 of the states that policy visits.
 
     uv run scripts/pretrain_go2osc_estimator.py --device cuda:0 \
-        --policy-dir logs/go2osc_retrain_508282d/go2osc_push_glide
+        --policy-dir logs/go2osc_main1500/go2osc_push_glide
 """
 
 import argparse
@@ -38,7 +38,7 @@ def arguments():
     parser.add_argument(
         "--policy-dir",
         type=Path,
-        default=ROOT / "logs/go2osc_retrain_508282d/go2osc_push_glide",
+        default=ROOT / "logs/go2osc_main1500/go2osc_push_glide",
     )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--num_envs", type=int, default=4096)
@@ -49,6 +49,11 @@ def arguments():
     parser.add_argument("--gradient_steps", type=int, default=8)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--no_sensor_noise",
+        action="store_true",
+        help="Train and evaluate on clean sensors (stages 2-4 did)",
+    )
     parser.add_argument(
         "--extra_features",
         nargs="*",
@@ -77,6 +82,7 @@ def make(args, checkpoint):
     settings = cfg.state_estimator
     settings.init_path = None
     settings.features = list(settings.features) + list(args.extra_features)
+    settings.sensor_noise.enabled = not args.no_sensor_noise
     settings.samples_per_step = args.samples_per_step
     settings.update_interval = args.update_interval
     settings.gradient_steps = args.gradient_steps

@@ -2,7 +2,7 @@
 
 Environment runs the estimator and
 publishes mu-hat and v-hat, but the actor and critic inputs are still the
-team's, so a go2osc_push_glide checkpoint (e.g. the 508282d retrain) loads
+team's, so a go2osc_push_glide checkpoint (e.g. the 1500-iteration main policy) loads
 unchanged and the estimator can be trained and checked against it. Adding
 mu-hat and v-hat to the actor is step 2.
 """
@@ -25,8 +25,9 @@ FRICTION_BIN_WEIGHTS = [0.2, 0.3, 0.4]
 
 # Signals the real Go2 provides: IMU (gyro, gravity direction, accelerometer),
 # joint encoders, the previous joint targets, the operator's command and the
-# controller's own oscillator phases. No contact forces, no true velocity.
-ESTIMATOR_FEATURES = PHASE_OBSERVATIONS + ["base_lin_acc"]
+# controller's own oscillator phases, and the motor torques the Go2 reports
+# (stage 3: a small gain). No contact forces, no true velocity.
+ESTIMATOR_FEATURES = PHASE_OBSERVATIONS + ["base_lin_acc", "torques"]
 
 
 class Go2OscPushGlideEstCfg(Go2OscPushGlideCfg):
@@ -60,6 +61,21 @@ class Go2OscPushGlideEstCfg(Go2OscPushGlideCfg):
         hidden_dims = [512, 256, 128]
         # Keep training on the true labels while PPO trains the policy.
         learn = True
+
+        class sensor_noise:
+            # Noise on the estimator's inputs only, in physical units. The
+            # commanded joint targets, commands and oscillator phases are
+            # known exactly and get none.
+            enabled = True
+            std = {
+                "base_lin_acc": 0.5,  # m/s^2 (~0.05 g, IMU noise + vibration)
+                "dof_pos_obs": 0.01,  # rad (encoder), as the actor's noise
+                "dof_vel": 0.1,  # rad/s (differentiated encoder)
+                "torques": 0.3,  # N m (estimated from motor current)
+            }
+            # Constant per episode and axis, uniform in +-value [m/s^2].
+            accelerometer_bias = 0.2
+
         learning_rate = 3.0e-4
         samples_per_step = 256  # random envs kept per control step
         update_interval = 24  # control steps between updates
