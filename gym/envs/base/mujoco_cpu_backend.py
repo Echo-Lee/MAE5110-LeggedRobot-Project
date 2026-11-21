@@ -204,8 +204,9 @@ class MuJocoCPUBackend(MuJocoBackendBase):
         )
 
         # Mass changes require environment-specific derived model constants.
-        # The headless model has already discarded visual assets, so private
-        # copies remain compact. Other serial worlds share one model.
+        # A headless training model has already discarded visual assets, so
+        # private copies stay compact; an off-screen recording keeps them
+        # (it runs few environments). Other serial worlds share one model.
         if self._randomize_link_mass:
             self._models = [mjm] + [copy.copy(mjm) for _ in range(num_envs - 1)]
             self._datas = [mujoco.MjData(model) for model in self._models]

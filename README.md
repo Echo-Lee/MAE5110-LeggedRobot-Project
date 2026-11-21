@@ -205,7 +205,12 @@ uv run --frozen python scripts/fetch_go2_meshes.py
 `scripts/play.py --video PATH` records environment 0 to an MP4 instead of
 opening a viewer: the camera follows the robot, and an overlay shows time,
 friction, commanded vs measured velocity, and loaded feet (`--no-overlay`
-to hide it). Combine with `--friction MU` and `--command VX VY YAW`:
+to hide it). Combine with `--friction MU` and `--command VX VY YAW`.
+Recording only adds visuals; physics, including the task's link-mass
+randomization, matches ordinary playback for the same `--seed`. On a
+Linux machine without a display it renders with EGL automatically; set
+`MUJOCO_GL` yourself to override that. macOS and Windows use MuJoCo's
+default renderer.
 
 ```sh
 uv run --frozen python scripts/play.py --task go2osc_push_glide \

@@ -19,7 +19,6 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 FOOT_LOAD_THRESHOLD_N = 5.0
-FOOT_LABELS = ("FL", "FR", "RL", "RR")
 _PANEL = (20, 20, 20, 170)
 _TEXT = (240, 239, 236, 255)
 _MUTED = (195, 194, 183, 255)
@@ -49,15 +48,40 @@ def overlay_lines(time_s, friction, command, velocity, estimate=None) -> list[st
     ]
 
 
-def draw_overlay(frame: np.ndarray, lines, feet_loaded, font) -> np.ndarray:
-    """Return ``frame`` with a translucent text panel and foot-contact boxes."""
+def foot_layout(positions) -> tuple[list[int], list[str]]:
+    """Order feet front-to-rear, left-to-right and label them from geometry.
+
+    ``positions`` are the feet's (x, y[, z]) in the base frame (x forward,
+    y left), in the robot's own foot order. Returns indices into that order,
+    sorted FL, FR, RL, RR for a quadruped (L, R for a biped), and matching
+    labels, so the overlay is right whatever order a URDF lists its feet in.
+    """
+    xy = np.asarray(positions, dtype=float)[:, :2]
+    front = xy[:, 0] > xy[:, 0].mean()
+    left = xy[:, 1] > xy[:, 1].mean()
+    fore_aft = len(xy) > 2
+    order = sorted(
+        range(len(xy)), key=lambda i: (fore_aft and not front[i], not left[i])
+    )
+    labels = [
+        ("" if not fore_aft else "F" if front[i] else "R") + ("L" if left[i] else "R")
+        for i in order
+    ]
+    return order, labels
+
+
+def draw_overlay(frame: np.ndarray, lines, feet, font) -> np.ndarray:
+    """Return ``frame`` with a translucent text panel and foot-contact boxes.
+
+    ``feet`` is a sequence of (label, loaded) pairs, drawn left to right.
+    """
     image = Image.fromarray(frame).convert("RGBA")
     layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
     pad, line_h = 10, int(font.size * 1.35)
     box = font.size + 4
     width = max(draw.textlength(line, font=font) for line in lines)
-    width = max(width, len(FOOT_LABELS) * (box * 2 + pad))
+    width = max(width, len(feet) * (box * 2 + pad))
     height = line_h * len(lines) + box + 2 * pad + 6
     draw.rectangle((8, 8, 8 + width + 2 * pad, 8 + height), fill=_PANEL)
     y = 8 + pad
@@ -65,13 +89,22 @@ def draw_overlay(frame: np.ndarray, lines, feet_loaded, font) -> np.ndarray:
         draw.text((8 + pad, y), line, font=font, fill=_TEXT if i else _MUTED)
         y += line_h
     x = 8 + pad
-    for label, loaded in zip(FOOT_LABELS, feet_loaded):
+    for label, loaded in feet:
         draw.rectangle(
             (x, y + 2, x + box, y + 2 + box), fill=_FOOT_ON if loaded else _FOOT_OFF
         )
         draw.text((x + box + 4, y + 2), label, font=font, fill=_TEXT)
         x += box * 2 + pad
     return np.asarray(Image.alpha_composite(image, layer).convert("RGB"))
+
+
+def feet_in_base_frame(env) -> np.ndarray:
+    """Environment 0's foot positions relative to its base, in the base frame."""
+    from gym.utils.torch_quat import quat_rotate_inverse
+
+    feet = env._rigid_body_pos[0, env.feet_indices] - env.root_states[0, :3]
+    quat = env.base_quat[0].expand(len(feet), 4)
+    return quat_rotate_inverse(quat, feet).cpu().numpy()
 
 
 class VideoRecorder:
@@ -117,6 +150,7 @@ class VideoRecorder:
         self._camera.elevation = self.TRACKING_ELEVATION_DEG
         self._camera.azimuth = self.TRACKING_AZIMUTH_DEG
         self._font = ImageFont.load_default(size=max(12, height // 30))
+        self._foot_order, self._foot_labels = foot_layout(feet_in_base_frame(env))
         self._ffmpeg = subprocess.Popen(
             [
                 ffmpeg,
@@ -165,9 +199,12 @@ class VideoRecorder:
                 self._mu_hat(),
             )
             loads = env.contact_forces[0, env.feet_indices, 2]
-            frame = draw_overlay(
-                frame, lines, (loads > FOOT_LOAD_THRESHOLD_N).tolist(), self._font
-            )
+            loaded = (loads > FOOT_LOAD_THRESHOLD_N).tolist()
+            feet = [
+                (label, loaded[i])
+                for i, label in zip(self._foot_order, self._foot_labels)
+            ]
+            frame = draw_overlay(frame, lines, feet, self._font)
         self._ffmpeg.stdin.write(np.ascontiguousarray(frame).tobytes())
         self.frames += 1
 

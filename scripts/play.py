@@ -20,8 +20,10 @@ The Go2 renders with its real meshes when they are installed
 """
 
 import argparse
+import copy
 import os
 import random
+import sys
 
 import torch
 
@@ -145,15 +147,39 @@ def get_play_args(argv=None):
     return args
 
 
-def setup(args):
+def select_mujoco_gl(args, environ=None, platform=None):
+    """Pick EGL for headless Linux recording, before MuJoCo is first imported.
+
+    Headless Linux machines (e.g. MoLab) need EGL for off-screen rendering.
+    macOS has no EGL and no DISPLAY in an ordinary terminal; MuJoCo's default
+    (CGL) works there, as on Windows. An explicit MUJOCO_GL is always kept.
+    """
+    environ = os.environ if environ is None else environ
+    platform = sys.platform if platform is None else platform
+    if (
+        args.video
+        and platform.startswith("linux")
+        and "MUJOCO_GL" not in environ
+        and not environ.get("DISPLAY")
+        and not environ.get("WAYLAND_DISPLAY")
+    ):
+        environ["MUJOCO_GL"] = "egl"
+
+
+def play_cfgs(args):
+    """Task configs with playback overrides applied (no env or runner yet)."""
     # Register tasks (imports the task classes).
     import gym.envs  # noqa: F401
 
-    env_cfg, train_cfg = task_registry.get_cfgs(
-        args.task,
-        original_cfg=args.original_cfg,
-        experiment_name=args.experiment_name,
-        load_run=args.load_run,
+    # Copies: the registry's configs are shared, and the overrides below are
+    # for this playback only.
+    env_cfg, train_cfg = copy.deepcopy(
+        task_registry.get_cfgs(
+            args.task,
+            original_cfg=args.original_cfg,
+            experiment_name=args.experiment_name,
+            load_run=args.load_run,
+        )
     )
 
     # Play-time overrides — small batch, long episodes, no pushes.
@@ -167,12 +193,9 @@ def setup(args):
     if hasattr(env_cfg, "viewer"):
         env_cfg.viewer.show_ui = args.viewer_ui
     if args.video:
-        # Per-environment mass randomization makes the CPU backend discard
-        # visual assets when headless (no ground texture, skybox, or lights),
-        # which hides sliding in a video. Record at nominal link masses.
-        env_cfg.domain_randomization.startup.link_mass_scale_range = None
-        # Load the configured visual model (real Go2 meshes) for off-screen
-        # rendering too, not only for the interactive viewer.
+        # Load visuals (real Go2 meshes, ground texture, skybox, lights) for
+        # off-screen rendering too. Display-only: physics, including link-mass
+        # randomization, is the same as in ordinary playback.
         env_cfg.asset.render_offscreen = True
     if args.friction is not None:
         # Use the friction axis as a zero-width envelope: every environment
@@ -204,10 +227,12 @@ def setup(args):
     train_cfg.logging.enable_local_saving = False
 
     task_registry.convert_frequencies_to_params(env_cfg, train_cfg)
-    task_registry.set_log_dir_name(train_cfg)
-    set_seed(env_cfg.seed)
+    return env_cfg, train_cfg
 
-    env = task_registry.make_env(
+
+def make_play_env(args, env_cfg):
+    set_seed(env_cfg.seed)
+    return task_registry.make_env(
         args.task,
         env_cfg,
         device=args.device,
@@ -215,6 +240,11 @@ def setup(args):
         backend=args.backend,
     )
 
+
+def setup(args):
+    env_cfg, train_cfg = play_cfgs(args)
+    task_registry.set_log_dir_name(train_cfg)
+    env = make_play_env(args, env_cfg)
     runner = task_registry.make_alg_runner(env, train_cfg)
     runner.switch_to_eval()
     return env, runner
@@ -262,17 +292,14 @@ def record(env, runner, args, command_at):
         recorder.close()
     print(
         f"wrote {args.video}: {recorder.frames} frames at {recorder.fps:g} fps, "
-        f"friction {env._backend.contact_friction[0].item():.3f}, "
-        "nominal link masses"
+        f"friction {env._backend.contact_friction[0].item():.3f}"
     )
 
 
-if __name__ == "__main__":
-    args = get_play_args()
-    if args.video and "MUJOCO_GL" not in os.environ and not os.environ.get("DISPLAY"):
-        # Headless machines (e.g. MoLab) need EGL for off-screen rendering.
-        # MuJoCo reads this when first imported, which happens in setup().
-        os.environ["MUJOCO_GL"] = "egl"
+def main(argv=None):
+    args = get_play_args(argv)
+    # MuJoCo reads MUJOCO_GL when first imported, which happens in setup().
+    select_mujoco_gl(args)
     with torch.no_grad():
         env, runner = setup(args)
         command_at = command_schedule(env, args)
@@ -333,3 +360,7 @@ if __name__ == "__main__":
             record(env, runner, args, command_at)
         else:
             play(env, runner, command_at)
+
+
+if __name__ == "__main__":
+    main()
