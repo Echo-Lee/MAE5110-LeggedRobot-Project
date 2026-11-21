@@ -27,6 +27,7 @@ def _env(num_envs=1):
     env.root_states = torch.zeros(num_envs, 13)
     env.root_states[:, 6] = 1.0
     env.base_quat = env.root_states[:, 3:7]
+    env.base_ang_vel = torch.zeros(num_envs, 3)
     env.oscillators = torch.full((num_envs, 4), 1.5 * math.pi)
     env.oscillators_vel = torch.zeros_like(env.oscillators)
     env.oscillator_obs = torch.zeros(num_envs, 8)
@@ -114,7 +115,109 @@ def test_rigid_base_rotation_and_translation_leave_the_gate_neutral():
     torch.testing.assert_close(env._compute_push_gate(), torch.full((1, 4), 0.5))
 
 
-@pytest.mark.parametrize("command", [[0, 0, 0], [0.2, 0, 0], [-0.2, 2, 1], [0, 3, 0]])
+def _silence_oscillator_noise(env):
+    for name in ("omega_noise_std", "coupling_noise_std", "process_noise_std"):
+        setattr(env.cfg.osc, name, 0.0)
+
+
+@pytest.mark.parametrize(
+    ("command", "standing", "gated"),
+    [
+        ([0.0, 0.0, 0.0], True, False),
+        ([0.2, 0.1, 0.1], True, False),
+        ([-0.2, -0.1, -0.1], True, False),
+        ([0.0, 0.0, 0.5], False, False),
+        ([0.0, 0.0, -0.11], False, False),
+        ([0.0, 0.3, 0.0], False, True),
+        ([0.1, -0.11, 0.0], False, True),
+        ([0.21, 0.0, 0.0], False, True),
+        ([1.0, 0.3, 0.5], False, True),
+    ],
+)
+def test_any_command_selects_moving_clocks_and_only_travel_enables_the_gate(
+    command, standing, gated
+):
+    env = _env()
+    env.commands[:] = torch.tensor(command)
+    assert env._slow_command_mask().tolist() == [[standing]]
+    assert env._moving().tolist() == [[not standing]]
+    assert env._translating().tolist() == [[gated]]
+
+
+def test_turn_in_place_runs_the_moving_clocks_on_ungated_load():
+    env = _env(2)
+    _silence_oscillator_noise(env)
+    env.commands[:] = torch.tensor([[0.0, 0.0, 0.5], [0.0, 0.0, 0.0]])
+    env.compute_osc_slope()
+    # Equation (5) moving set at zero forward speed, against the standing set.
+    torch.testing.assert_close(env.osc_omega, torch.tensor([[1.5], [1.0]]))
+    torch.testing.assert_close(env.osc_coupling, torch.tensor([[1.0], [4.0]]))
+    torch.testing.assert_close(env.osc_offset, torch.tensor([[0.0], [1.0]]))
+    # Foot motion must not gate the load when there is no travel direction.
+    env.root_states[:, 7] = 1.0
+    _set_foot_velocities(env, [[0, 0, 0], [1, 0, 0], [3, 0, 0], [-2, 1, 0]])
+    torch.testing.assert_close(env._compute_push_signal(), torch.full((2, 4), 0.25))
+    env.oscillators[:] = torch.tensor([0.0, 0.5 * math.pi, math.pi, 1.5 * math.pi])
+    turning = 1.5 - 0.25 * torch.tensor([1.0, 0.0, -1.0, 0.0])
+    standing = 1.0 - 4.0 * 0.25 * torch.tensor([2.0, 1.0, 0.0, 1.0])
+    drift = env._compute_oscillator_drift()
+    torch.testing.assert_close(
+        drift, torch.stack((turning, standing)), atol=1e-6, rtol=0
+    )
+    # The glide half charges drag for the turn and load for the stand.
+    env.contact_forces[:, env.feet_indices, 0] = 0.05 * WEIGHT
+    env.oscillators.fill_(0.5 * math.pi)
+    torch.testing.assert_close(env._reward_glide_drag(), torch.tensor([-0.2, -1.0]))
+
+
+def test_frequency_scale_reaches_turn_in_place_clocks():
+    env = _env(2)
+    env.cfg = configs.Go2OscPushGlideF050Cfg()
+    _silence_oscillator_noise(env)
+    env.commands[:] = torch.tensor([[0.0, 0.0, 0.5], [0.0, 0.0, 0.0]])
+    env.compute_osc_slope()
+    torch.testing.assert_close(env.osc_omega, torch.tensor([[0.75], [1.0]]))
+
+
+def test_sidestep_gates_load_along_the_sideways_command():
+    env = _env()
+    env.commands[:] = torch.tensor([0.0, 0.3, 0.0])
+    env.root_states[:, 8] = 0.3
+    # Planted, carried with the base, swinging with it, and moving forward only.
+    _set_foot_velocities(env, [[0, 0, 0], [0, 0.3, 0], [0, 0.5, 0], [2, 0.3, 0]])
+    expected = 0.25 * torch.tensor([[_gate(-0.3), 0.5, _gate(0.2), 0.5]])
+    torch.testing.assert_close(env._compute_push_signal(), expected)
+
+
+def test_missing_steering_thresholds_keep_the_forward_only_rule():
+    env = _env(3)
+    env.cfg.osc.sideways_stop_threshold = None
+    env.cfg.osc.turning_stop_threshold = None
+    env.commands[:] = torch.tensor([[0.0, 0.0, 0.5], [0.0, 0.3, 0.0], [0.3, 0.0, 0.0]])
+    assert env._slow_command_mask().flatten().tolist() == [True, True, False]
+    assert env._moving().flatten().tolist() == [False, False, True]
+    assert env._translating().flatten().tolist() == [False, False, True]
+    _silence_oscillator_noise(env)
+    env.compute_osc_slope()
+    torch.testing.assert_close(env.osc_omega, torch.tensor([[1.0], [1.0], [1.8]]))
+
+
+def test_tilt_rate_penalty_is_squared_roll_and_pitch_rate_only():
+    env = _env(3)
+    env.base_ang_vel = torch.tensor(
+        [[0.3, -0.4, 5.0], [0.0, 0.0, 2.0], [1.0, 1.5, 0.0]]
+    )
+    expected = torch.tensor([-0.25, 0.0, -3.25])
+    torch.testing.assert_close(env._reward_tilt_rate(), expected)
+    # Thrashing costs no more than the cap.
+    env.base_ang_vel[2] = torch.tensor([3.0, -4.0, 0.0])
+    assert env.cfg.reward_settings.tilt_rate_cap == 4.0
+    torch.testing.assert_close(env._reward_tilt_rate()[2], torch.tensor(-4.0))
+
+
+@pytest.mark.parametrize(
+    "command", [[0, 0, 0], [0.2, 0, 0], [-0.2, 0.1, 0.1], [0.1, -0.1, -0.1]]
+)
 def test_slow_branch_feeds_back_plain_normal_load(command):
     env = _env()
     env.commands[:] = torch.tensor(command, dtype=torch.float)
@@ -328,7 +431,7 @@ def test_glide_cost_applies_only_in_the_glide_half_of_the_phase():
     )
 
 
-@pytest.mark.parametrize("command", [[0, 0, 0], [0.2, 0, 0], [-0.1, 1, 0]])
+@pytest.mark.parametrize("command", [[0, 0, 0], [0.2, 0, 0], [-0.1, 0.1, 0.1]])
 def test_slow_branch_glide_cost_is_the_original_normal_load_penalty(command):
     env = _env()
     env.commands[:] = torch.tensor(command, dtype=torch.float)
@@ -427,6 +530,28 @@ def test_invalid_push_reward_shape_fails_before_simulation(field, value):
         Go2OscPushGlide._validate_push_glide_cfg(cfg)
 
 
+@pytest.mark.parametrize("cap", [0.0, -1.0, float("nan"), float("inf"), True])
+def test_invalid_tilt_rate_cap_fails_before_simulation(cap):
+    cfg = configs.Go2OscPushGlideCfg()
+    cfg.reward_settings.tilt_rate_cap = cap
+    with pytest.raises(ValueError, match="tilt_rate_cap"):
+        Go2OscPushGlide._validate_push_glide_cfg(cfg)
+
+
+@pytest.mark.parametrize(
+    ("sideways", "turning"),
+    [(None, 0.1), (0.1, None), (-0.1, 0.1), (0.1, float("nan")), (True, 0.1)],
+)
+def test_invalid_steering_thresholds_fail_before_simulation(sideways, turning):
+    cfg = configs.Go2OscPushGlideCfg()
+    cfg.osc.sideways_stop_threshold = sideways
+    cfg.osc.turning_stop_threshold = turning
+    with pytest.raises(ValueError, match="sideways_stop_threshold"):
+        Go2OscPushGlide._validate_push_glide_cfg(cfg)
+    cfg.osc.sideways_stop_threshold = cfg.osc.turning_stop_threshold = None
+    Go2OscPushGlide._validate_push_glide_cfg(cfg)
+
+
 def test_push_glide_variant_changes_only_declared_signals_inputs_and_rewards():
     baseline = class_to_dict(configs.Go2OscORC111GRFDirectionalCfg())
     variant = class_to_dict(configs.Go2OscPushGlideCfg())
@@ -438,6 +563,10 @@ def test_push_glide_variant_changes_only_declared_signals_inputs_and_rewards():
     assert baseline["osc"]["stop_threshold"] == 0.5
     assert variant["osc"]["stop_threshold"] == 0.2
     variant["osc"]["stop_threshold"] = 0.5
+    assert variant["osc"].pop("sideways_stop_threshold") == 0.1
+    assert variant["osc"].pop("turning_stop_threshold") == 0.1
+    assert variant["reward_settings"].pop("tilt_rate_cap") == 4.0
+    assert variant["control"].pop("action_limit") == 10.0
     assert variant["scaling"].pop("foot_traction_obs") == 1.0
     assert variant["scaling"].pop("contact_friction_obs") == 1.0
     assert variant["commands"]["forward_uniform_range"] == [0.0, 1.5]
@@ -453,7 +582,7 @@ def test_push_glide_variant_changes_only_declared_signals_inputs_and_rewards():
     assert variant["reward_settings"].pop("push_load_cap") == 0.5
     assert variant["reward_settings"].pop("push_window_saturation") == 0.5
     assert baseline["reward_settings"]["yaw_tracking_tolerance"] is None
-    assert variant["reward_settings"]["yaw_tracking_tolerance"] == 0.5
+    assert variant["reward_settings"]["yaw_tracking_tolerance"] == 0.25
     variant["reward_settings"]["yaw_tracking_tolerance"] = None
     assert variant == baseline
 
@@ -476,6 +605,7 @@ def test_push_glide_variant_changes_only_declared_signals_inputs_and_rewards():
     assert baseline["critic"]["reward"]["weights"]["lin_vel_z"] == 0.0
     assert weights["lin_vel_z"] == 2.0
     weights["lin_vel_z"] = 0.0
+    assert weights.pop("tilt_rate") == 1.0
     assert variant == baseline
 
 
@@ -534,6 +664,12 @@ def test_sampled_commands_cover_slow_walking_standing_and_bounded_steering():
             "moving": (moving, 0.72 * 1.3 / 1.5),
             "formerly untrained 0.2-0.5 m/s": (moving & (forward < 0.5), 0.144),
         }
+        # Standing clocks need all three commands small: every all-zero sample,
+        # a fifth of the turn-only ones and a few slow, barely steered ones.
+        idle = ~moving & (sideways.abs() <= 0.1) & (turning.abs() <= 0.1)
+        expected["standing clocks"] = (idle, 0.189)
+        expected["turning in place on moving clocks"] = (halted & ~idle, 0.144 * 0.8)
+        assert torch.equal(env._slow_command_mask()[:, 0], idle[-128:])
         for name, (selected, share) in expected.items():
             assert abs(selected.float().mean().item() - share) < 0.025, name
     finally:
@@ -671,6 +807,27 @@ def test_native_relative_foot_velocity_depends_on_joints_not_base_motion():
         torch.testing.assert_close(still, world_still, atol=2e-5, rtol=0)
         torch.testing.assert_close(moving, still, atol=5e-5, rtol=0)
         assert (world_moving - world_still).norm(dim=-1).min() > 0.3
+    finally:
+        backend.close()
+
+
+def test_native_turn_command_keeps_the_clocks_running_on_a_standing_robot():
+    env, _, backend = _make_cpu_env(num_envs=2, gains=(100.0, 3.0))
+    try:
+        _silence_oscillator_noise(env)
+        command = torch.tensor([[0.0, 0.0, 0.5], [0.0, 0.0, 0.0]])
+        for _ in range(400):
+            env.commands[:] = command
+            env.step()
+        assert not env.terminated.any()
+        normal, _ = env._foot_loads()
+        assert torch.all(normal > 0.15)
+        rate = env.oscillators_vel / (2 * math.pi)
+        # Moving clocks: 1.5 Hz, shifted by at most the load each foot carries.
+        assert torch.all((rate[0] - 1.5).abs() <= normal[0] + 1e-4)
+        assert torch.all(rate[0] > 1.0)
+        # Standing clocks: locked.
+        assert rate[1].abs().max() < 0.01
     finally:
         backend.close()
 

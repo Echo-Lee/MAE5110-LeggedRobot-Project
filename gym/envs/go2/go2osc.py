@@ -142,10 +142,14 @@ class Go2Osc(Go2):
         self.grf.copy_(self._compute_grf())
         self.compute_osc_slope(reset_mask)
 
+    def _slow_command_mask(self):
+        """Environments on the standing branch of Equation (5)."""
+        return self.commands[:, :1].abs() <= self.cfg.osc.stop_threshold
+
     def compute_osc_slope(self, update_mask=None):
         """Equation (5), with optional explicitly configured parameter noise."""
         speed = self.commands[:, :1].abs()
-        slow = speed <= self.cfg.osc.stop_threshold
+        slow = self._slow_command_mask()
         omega = torch.where(
             slow,
             torch.full_like(speed, self.cfg.osc.omega_stop),
@@ -619,7 +623,7 @@ class Go2OscDirectional(Go2Osc):
         scale = self.cfg.osc.moving_frequency_scale
         if scale == 1.0:
             return
-        moving = self.commands[:, :1].abs() > self.cfg.osc.stop_threshold
+        moving = ~self._slow_command_mask()
         if update_mask is not None:
             moving = moving & update_mask.unsqueeze(1)
         torch.where(moving, self.osc_omega * scale, self.osc_omega, out=self.osc_omega)
@@ -1318,7 +1322,9 @@ class Go2OscPushGlide(Go2OscDirectional):
     loaded foot may therefore stay on low-friction ground through its glide
     half, where the drag it pays is small, but not on high-friction ground.
     At or below the threshold every signal is plain normal load, which keeps
-    the standing fixed point of Equation (4) in mid-stance.
+    the standing fixed point of Equation (4) in mid-stance. With the steering
+    thresholds set, a sideways or turning command also selects the moving
+    clocks, so the robot can step in place.
     """
 
     def __init__(self, cfg, device, headless, backend):
@@ -1350,6 +1356,39 @@ class Go2OscPushGlide(Go2OscDirectional):
                 or not 0.0 < value <= 1.0
             ):
                 raise ValueError(f"{name} must be finite and in (0, 1]")
+        cap = getattr(cfg.reward_settings, "tilt_rate_cap", 4.0)
+        if (
+            not isinstance(cap, (int, float))
+            or isinstance(cap, bool)
+            or not math.isfinite(cap)
+            or cap <= 0.0
+        ):
+            raise ValueError("tilt_rate_cap must be finite and positive")
+        # Configurations saved before this field existed leave targets unbounded.
+        limit = getattr(cfg.control, "action_limit", None)
+        if limit is not None and (
+            not isinstance(limit, (int, float))
+            or isinstance(limit, bool)
+            or not math.isfinite(limit)
+            or limit <= 0.0
+        ):
+            raise ValueError("action_limit must be None or finite and positive")
+        # Both steering thresholds, or neither for the forward-only rule.
+        steering = [
+            getattr(cfg.osc, name, None)
+            for name in ("sideways_stop_threshold", "turning_stop_threshold")
+        ]
+        if any(value is not None for value in steering) and any(
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            or value < 0.0
+            for value in steering
+        ):
+            raise ValueError(
+                "sideways_stop_threshold and turning_stop_threshold must both be "
+                "None or both finite and nonnegative"
+            )
 
     def _init_buffers(self):
         super()._init_buffers()
@@ -1358,9 +1397,48 @@ class Go2OscPushGlide(Go2OscDirectional):
         self._refresh_traction_observations()
         self._refresh_friction_observation()
 
+    def _pre_decimation_step(self):
+        self._limit_joint_targets()
+        super()._pre_decimation_step()
+
+    def _limit_joint_targets(self):
+        """Bound the commanded joint offsets, in units of the policy action.
+
+        The policy sees its previous target, so an unbounded target can feed on
+        itself once the robot leaves the states it was trained on.
+        """
+        limit = getattr(self.cfg.control, "action_limit", None)
+        if limit is None:
+            return
+        bound = limit * self.scales["dof_pos_target"]
+        self.dof_pos_target.clamp_(-bound, bound)
+
+    def _slow_command_mask(self):
+        """Standing clocks only when no command asks the robot to move.
+
+        Equation (5) switches on the forward command alone, which leaves a
+        turn or sidestep in place on clocks that hold loaded feet still.
+        Configurations without the two steering thresholds keep that rule.
+        """
+        slow = super()._slow_command_mask()
+        sideways = getattr(self.cfg.osc, "sideways_stop_threshold", None)
+        turning = getattr(self.cfg.osc, "turning_stop_threshold", None)
+        if sideways is None or turning is None:
+            return slow
+        steering = self.commands[:, 1:3].abs()
+        return slow & (steering[:, :1] <= sideways) & (steering[:, 1:] <= turning)
+
     def _moving(self):
-        """Same regime split as Equation (5): forward command above threshold."""
-        return self.commands[:, :1].abs() > self.cfg.osc.stop_threshold
+        """Environments on the moving branch of the oscillator schedule."""
+        return ~self._slow_command_mask()
+
+    def _translating(self):
+        """Commands with a travel direction for the push gate to act along."""
+        forward = self.commands[:, :1].abs() > self.cfg.osc.stop_threshold
+        sideways = getattr(self.cfg.osc, "sideways_stop_threshold", None)
+        if sideways is None:
+            return forward
+        return forward | (self.commands[:, 1:2].abs() > sideways)
 
     def _foot_loads(self):
         """Normal and tangential foot force in body weights, each at most 1."""
@@ -1396,8 +1474,12 @@ class Go2OscPushGlide(Go2OscDirectional):
         return torch.sigmoid(-along / self.cfg.osc.push_gate_speed)
 
     def _gated(self, load):
-        """Apply the foot-motion gate when moving; pass the load through otherwise."""
-        return torch.where(self._moving(), load * self._compute_push_gate(), load)
+        """Apply the foot-motion gate when translating; else pass the load through.
+
+        A turn in place has no travel direction, so its load is not gated.
+        """
+        gated = load * self._compute_push_gate()
+        return torch.where(self._translating(), gated, load)
 
     def _compute_push_signal(self):
         """Gated normal load when moving; plain normal load otherwise."""
@@ -1437,6 +1519,16 @@ class Go2OscPushGlide(Go2OscDirectional):
         normal, tangent = self._foot_loads()
         cost = torch.where(self._moving(), tangent, normal)
         return -(phase * cost).sum(dim=1)
+
+    def _reward_tilt_rate(self):
+        """Negative squared roll and pitch rate of the base [rad^2/s^2], capped.
+
+        Quadratic, so it still has a slope at the rocking a trot produces,
+        where the squared-exponential ang_vel_xy term is nearly flat. The cap
+        bounds what untrained thrashing can cost.
+        """
+        rate = self.base_ang_vel[:, :2].square().sum(dim=1)
+        return -rate.clamp(max=self.cfg.reward_settings.tilt_rate_cap)
 
     def _refresh_traction_observations(self, reset_mask=None):
         """FL/FR/RL/RR, each [forward, left] tangential over normal force.
