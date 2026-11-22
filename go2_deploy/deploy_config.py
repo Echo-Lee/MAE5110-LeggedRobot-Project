@@ -14,6 +14,19 @@ class DeployConfig:
     kp = 30.0  # Stiffness constant
     kd = 2.0  # Damping constant
 
+    # Mechanical Go2 joint limits from resources/robots/go2/urdf/go2.urdf,
+    # in canonical FL, FR, RL, RR / hip, thigh, calf order.  Commands sent
+    # to hardware stay this far inside the hard stops.
+    joint_target_margin = 0.05  # rad
+    _joint_lower = torch.tensor(
+        [-1.0472, -1.5708, -2.7227] * 2 + [-1.0472, -0.5236, -2.7227] * 2
+    )
+    _joint_upper = torch.tensor(
+        [1.0472, 3.4907, -0.83776] * 2 + [1.0472, 4.5379, -0.83776] * 2
+    )
+    joint_target_lower = _joint_lower + joint_target_margin
+    joint_target_upper = _joint_upper - joint_target_margin
+
     # Apply exponential moving average to actions
     exp_moving_avg = False
     ema_smoothing_factor = 0.1

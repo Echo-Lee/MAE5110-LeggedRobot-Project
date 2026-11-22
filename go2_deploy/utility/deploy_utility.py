@@ -109,6 +109,12 @@ def target_pos_to_action(main_controller, target_pos):
 # Adds the static default posture and maps targets to Unitree motor order.
 def action_to_lowcmd(main_controller, action_qgym_convention, kp_mult=1.0, kd_mult=1.0):
     target_pos_qgym = action_to_target_pos(main_controller, action_qgym_convention)
+    # Final hardware guard.  This is deliberately after the actor's action
+    # scaling and before conversion to Unitree motor order.
+    target_pos_qgym = torch.maximum(
+        torch.minimum(target_pos_qgym, main_controller.cfg.joint_target_upper),
+        main_controller.cfg.joint_target_lower,
+    )
     target_pos = target_pos_qgym[QGYM_TO_UNITREE_JOINT_IDX]
 
     lowcmd = main_controller.default_lowcmd

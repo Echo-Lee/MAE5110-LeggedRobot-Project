@@ -624,6 +624,11 @@ class Go2OscPushGlideRobustRunnerCfg(Go2OscPushGlideCotRunnerCfg):
                 yaw_overshoot = 1.0
                 # Standing still while the clocks stand (see reward_settings).
                 standing = 2.0
+                # The physical Go2 has hard stops.  Keep both commanded
+                # targets and simulated joint angles away from them during
+                # the limit-aware fine-tuning stage.
+                dof_pos_target_limits = 5.0
+                dof_pos_limits = 10.0
 
             class termination_weight(
                 Go2OscPushGlideCotRunnerCfg.critic.reward.termination_weight
