@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 def get_custom_impl_module(name=None):
-    name = name or os.environ.get("GO2_CUSTOM_IMPL", "xuyi_chenyu_thomas.py")
+    name = name or os.environ.get("GO2_CUSTOM_IMPL", "go2osc_push_glide.py")
     path = Path(__file__).resolve().parents[1] / "custom_implementation" / name
     spec = importlib.util.spec_from_file_location(path.stem, path)
     if spec is None or spec.loader is None:
