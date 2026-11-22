@@ -26,9 +26,13 @@ def setup_actor(run_name=None):
 
     train_cfg.runner.device = "cpu"
     train_cfg.runner.resume = True
+    if hasattr(deploy_cfg, "experiment_name"):
+        train_cfg.runner.experiment_name = deploy_cfg.experiment_name
     if run_name is not None:
         train_cfg.runner.load_run = run_name
-    train_cfg.runner.checkpoint = -1
+    elif hasattr(deploy_cfg, "load_run"):
+        train_cfg.runner.load_run = deploy_cfg.load_run
+    train_cfg.runner.checkpoint = getattr(deploy_cfg, "checkpoint", -1)
     train_cfg.logging.enable_local_saving = False
 
     task_registry.convert_frequencies_to_params(env_cfg, train_cfg)

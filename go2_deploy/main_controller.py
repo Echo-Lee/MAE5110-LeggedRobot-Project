@@ -9,6 +9,7 @@ from go2_deploy.deploy_config import DeployConfig
 from go2_deploy.utility import deploy_utility
 from go2_deploy.utility.csv_logger import CSVLogger
 from go2_deploy.utility.thread import RecurrentThread
+from go2_deploy.utility.import_custom_impl import custom_impl
 
 import torch
 from unitree_sdk2py.core.channel import (
@@ -47,8 +48,7 @@ class MainController:
             self.obs_vec_size += self.cfg.obs_sizes[obs]
 
         self._init_buffers()
-        if self.cfg.task_name == "go2trot":
-            self._init_go2trot_buffers()
+        self._init_custom_buffers()
 
         self._init_unitree_clients()
 
@@ -103,6 +103,10 @@ class MainController:
     def _init_go2trot_buffers(self):
         self.phase_frequency = self.cfg.phase_frequency
         self.phase = 0.0
+
+    def _init_custom_buffers(self):
+        for key, value in custom_impl.get_custom_buffers_dict().items():
+            setattr(self, key, value)
 
     # Unitree SDK pub/sub clients
     def _init_unitree_clients(self):
@@ -162,9 +166,6 @@ class MainController:
     # Read last lowstate msg, publish LowCmd_
     def _control_loop(self):
         t = time.monotonic()
-        if self.cfg.task_name == "go2trot":
-            self._process_go2trot_buffers(t)
-
         with self.last_command_lock:
             self.last_command = torch.tensor(
                 [
@@ -173,6 +174,7 @@ class MainController:
                     self.remote_controller.yaw_vel,
                 ]
             )
+        custom_impl.update_custom_buffers(self, t)
 
         with (
             self.last_lowstate_msg_lock,

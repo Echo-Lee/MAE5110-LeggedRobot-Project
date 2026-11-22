@@ -1,5 +1,6 @@
 import torch
 from go2_deploy.deploy_config import DeployConfig
+from go2_deploy.utility.import_custom_impl import custom_impl
 from gym.utils.torch_quat import quat_rotate_inverse
 
 # Unitree motor order: Front Right hip (haa), FR thigh (hfe), FR calf (kfe),
@@ -77,9 +78,8 @@ def lowstate_to_obs(main_controller, lowstate_msg):
         "dof_vel": _get_obs_dof_vel,
         "dof_accel": _get_obs_dof_accel,
         "dof_pos_target": _get_obs_dof_pos_target,
-        "phase_obs": _get_obs_phase_obs,
-        "phase_frequency": _get_obs_phase_frequency,
     }
+    get_obs_piece.update(custom_impl.get_custom_obs_pieces())
 
     obs_vector = torch.zeros(main_controller.obs_vec_size)
     i = 0

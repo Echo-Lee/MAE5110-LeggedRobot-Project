@@ -1,41 +1,32 @@
 from gym.envs.go2.go2trot_config import Go2TrotCfg
 import torch
+from go2_deploy.utility.import_custom_impl import custom_impl
 
 
 class DeployConfig:
-    task_name = "go2trot"
+    task_name = "go2osc_push_glide_robust"
+    experiment_name = "go2osc_push_glide_robust_carve_4000"
+    load_run = "Nov20_18-29-45_"
+    checkpoint = 4000
 
     ctrl_freq = 100  # Hz
 
     kp = 30.0  # Stiffness constant
     kd = 2.0  # Damping constant
 
-    phase_frequency = 2.0  # Go2Trot gait frequency in Hz (cycles/s)
-
     # Apply exponential moving average to actions
-    exp_moving_avg = True
+    exp_moving_avg = False
     ema_smoothing_factor = 0.1
 
-    obs_vector = [
-        "base_ang_vel",
-        "projected_gravity",
-        "commands",
-        "dof_pos_obs",
-        "dof_vel",
-        "dof_pos_target",
-        "phase_obs",
-        "phase_frequency",
-    ]  # add later? foot contact
+    obs_vector = custom_impl.CustomDeployConfig.obs_vector
 
     # Scale observations
-    class DeployScaling(Go2TrotCfg.scaling):
+    class DeployScaling(custom_impl.CustomDeployConfig.DeployScaling):
         pass
 
     # Set ranges of joystick commands
     command_limits = {
-        "lin_vel_x": 2.0,  # m/s
-        "lin_vel_y": 1.0,  # m/s
-        "yaw_vel": 3.0,  # rad/s
+        "lin_vel_x": 2.0, "lin_vel_y": 0.3, "yaw_vel": 0.5,
     }
 
     # Specify size of observation vector. should not have to modify this
@@ -47,9 +38,8 @@ class DeployConfig:
         "dof_vel": 12,
         "dof_accel": 12,
         "dof_pos_target": 12,
-        "phase_obs": 2,
-        "phase_frequency": 1,
     }
+    obs_sizes.update(custom_impl.CustomDeployConfig.custom_obs_sizes)
 
     # Canonical FL, FR, RL, RR order; hip, thigh, calf within each leg.
     default_dof_pos = torch.tensor(
