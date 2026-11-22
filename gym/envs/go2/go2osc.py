@@ -8,6 +8,7 @@ import torch
 from gym import GYM_ROOT_DIR
 from gym.envs.base.domain_randomization import contact_friction_range
 from gym.envs.go2.go2 import Go2
+from gym.envs.go2.go2osc_joint_targets import joint_target_bounds, keep_joint_targets
 from gym.envs.go2.go2osc_speed_target import Go2OscSpeedTargetMixin
 from gym.utils.sampling import masked_update
 from gym.utils.torch_quat import quat_apply
@@ -1456,28 +1457,10 @@ class Go2OscPushGlide(Go2OscSpeedTargetMixin, Go2OscDirectional):
         self._keep_targets_inside_joint_limits()
 
     def _joint_target_bounds(self):
-        """(lowest, highest) joint-target offset [rad] the hard stops allow.
-
-        The joint limits less control.joint_target_margin [rad], relative to
-        the default posture; None without the setting. MuJoCo's limits are
-        soft and the real stops are not, so a target is never placed on or
-        past a stop.
-        """
-        margin = getattr(self.cfg.control, "joint_target_margin", None)
-        if margin is None:
-            return None
-        limits = self.dof_pos_limits.index_select(0, self.actuated_dof_indices)
-        default = self.default_dof_pos.index_select(1, self.actuated_dof_indices)
-        return limits[:, 0] + margin - default, limits[:, 1] - margin - default
+        return joint_target_bounds(self)
 
     def _keep_targets_inside_joint_limits(self):
-        bounds = self._joint_target_bounds()
-        if bounds is None:
-            return
-        low, high = bounds
-        self.dof_pos_target.copy_(
-            torch.maximum(torch.minimum(self.dof_pos_target, high), low)
-        )
+        keep_joint_targets(self)
 
     def _slow_command_mask(self):
         """Standing clocks only when no command asks the robot to move.

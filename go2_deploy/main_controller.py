@@ -1,13 +1,11 @@
 import time
 import threading
-import math
 
 from go2_deploy.state import State
 from go2_deploy.unitree_remote_controller import UnitreeRemoteController, RCHandler
 from go2_deploy.utility import deploy_utility
 from go2_deploy.utility.csv_logger import CSVLogger
 from go2_deploy.utility.thread import RecurrentThread
-from go2_deploy.deploy_config import DeployConfig
 from go2_deploy.utility.import_custom_impl import custom_impl
 
 import torch

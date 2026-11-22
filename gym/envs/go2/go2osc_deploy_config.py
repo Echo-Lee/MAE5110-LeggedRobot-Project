@@ -56,8 +56,9 @@ class Go2OscPushGlideDeployCfg(Go2OscPushGlideRobustCfg):
     class state_estimator(Go2OscPushGlideEstCfg.state_estimator):
         # Trained from scratch beside the policy: no file to start from.
         init_path = None
-        # Its input mean/std average over this many updates (one per PPO
-        # iteration) before they freeze, because the first states of an
+        # Its input mean/std average over this many estimator updates
+        # (one per update_interval control steps) before they freeze,
+        # because the first states of an
         # untrained policy are not the states of a walking one.
         normalization_updates = 300
 

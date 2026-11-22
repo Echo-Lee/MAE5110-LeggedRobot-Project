@@ -37,9 +37,11 @@ def get_custom_buffers_dict():
 
 # Define how your custom buffers should be updated at the control frequency
 def update_custom_buffers(main_controller, t):
-    main_controller.phase = 2 * math.pi * main_controller.phase_frequency * t % (2 * math.pi)
+    main_controller.phase = (
+        2 * math.pi * main_controller.phase_frequency * t % (2 * math.pi)
+    )
 
-# Return a dict mapping observation names to functions that generate the observation pieces
+# Map observation names to functions that generate the observation pieces.
 def get_custom_obs_pieces():
     obs_pieces = {
         "phase_obs": _get_obs_phase_obs,
