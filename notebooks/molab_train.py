@@ -190,7 +190,9 @@ def _():
 
 
 @app.cell
-def _(ENV, WANDB_API_KEY):
+def _(ENV, REPO, WANDB_API_KEY):
+    import json
+
     _wandb_key = WANDB_API_KEY.strip()
     if not _wandb_key:
         raise RuntimeError(
@@ -198,7 +200,17 @@ def _(ENV, WANDB_API_KEY):
         )
     # The training subprocess inherits ENV. Never print the key.
     ENV["WANDB_API_KEY"] = _wandb_key
-    print("W&B API key loaded for this runtime.")
+    _wandb_cfg = REPO / "user" / "wandb_config.json"
+    _wandb_cfg.parent.mkdir(parents=True, exist_ok=True)
+    _wandb_cfg.write_text(
+        json.dumps(
+            {
+                "entity": "echo-lichenyu-cornell-university",
+                "project": "go2-push-glide-deploy",
+            }
+        )
+    )
+    print("W&B API key and project configuration loaded for this runtime.")
     return
 
 
