@@ -184,9 +184,17 @@ class Go2OscPushGlideEst(Go2OscPushGlide):
     # Friction switches
     # ------------------------------------------------------------------
     def _friction_switch_settings(self):
-        """The friction_switch config if switching is on, else None."""
+        """The friction_switch config if switching is on, else None.
+
+        Switching needs the friction axis: with friction randomization off
+        (e.g. apply_domain_randomization_override "off") the backend has one
+        fixed friction and no per-env values to switch, so the task runs on
+        fixed friction instead.
+        """
         settings = getattr(self.cfg, "friction_switch", None)
         if settings is None or settings.probability <= 0.0:
+            return None
+        if contact_friction_range(self.cfg) is None:
             return None
         return settings
 

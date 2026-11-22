@@ -423,3 +423,19 @@ def test_accelerometer_bias_is_constant_per_episode_and_resampled_on_reset(env):
     env._reset_idx(mask)
     assert not torch.allclose(env.accelerometer_bias[mask], before[mask])
     torch.testing.assert_close(env.accelerometer_bias[~mask], before[~mask])
+
+
+def test_domain_randomization_off_builds_a_fixed_friction_task():
+    from gym.envs.base.domain_randomization import apply_domain_randomization_override
+
+    task, _, backend = _make(
+        lambda cfg: apply_domain_randomization_override(cfg, "off")
+    )
+    try:
+        assert task.cfg.friction_switch.probability > 0  # config untouched
+        assert task._friction_switch_settings() is None  # ... but no switching
+        for _ in range(3):
+            task.step()
+        assert torch.isinf(task.friction_switch_time).all()
+    finally:
+        backend.close()
