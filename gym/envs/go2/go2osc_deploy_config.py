@@ -94,6 +94,9 @@ class Go2OscPushGlideDeployRunnerCfg(Go2OscPushGlideRobustRunnerCfg):
                 # measured angle beyond the limit.
                 dof_pos_target_limits = POSTURE_WEIGHTS.dof_pos_target_limits
                 dof_pos_limits = POSTURE_WEIGHTS.dof_pos_limits
+                # Penalize the raw policy target beyond the deployment clamp,
+                # so the policy learns not to sit on the clamp's dead zone.
+                joint_target_clamp = 5.0
 
     class runner(Go2OscPushGlideRobustRunnerCfg.runner):
         experiment_name = "go2osc_push_glide_deploy"

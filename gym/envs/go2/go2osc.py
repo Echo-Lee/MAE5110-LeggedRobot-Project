@@ -83,6 +83,9 @@ class Go2Osc(Go2):
 
     def _init_buffers(self):
         super()._init_buffers()
+        # Preserve the policy target before the hard joint-limit clamp.  The
+        # reward below gives PPO a signal to stop relying on that clamp.
+        self.raw_dof_pos_target = torch.zeros_like(self.dof_pos_target)
         self._physical_reset_mask = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
@@ -1450,6 +1453,7 @@ class Go2OscPushGlide(Go2OscSpeedTargetMixin, Go2OscDirectional):
         The policy sees its previous target, so an unbounded target can feed on
         itself once the robot leaves the states it was trained on.
         """
+        self.raw_dof_pos_target.copy_(self.dof_pos_target)
         limit = getattr(self.cfg.control, "action_limit", None)
         if limit is not None:
             bound = limit * self.scales["dof_pos_target"]
@@ -1461,6 +1465,17 @@ class Go2OscPushGlide(Go2OscSpeedTargetMixin, Go2OscDirectional):
 
     def _keep_targets_inside_joint_limits(self):
         keep_joint_targets(self)
+
+    def _reward_joint_target_clamp(self):
+        """Penalize target excess before the hard safety clamp truncates it."""
+        bounds = self._joint_target_bounds()
+        if bounds is None:
+            return torch.zeros(self.num_envs, device=self.device)
+        low, high = bounds
+        excess = (low - self.raw_dof_pos_target).clamp(min=0.0)
+        excess += (self.raw_dof_pos_target - high).clamp(min=0.0)
+        span = (high - low).clamp(min=1.0e-6)
+        return -(excess / span).mean(dim=1)
 
     def _slow_command_mask(self):
         """Standing clocks only when no command asks the robot to move.
