@@ -121,10 +121,9 @@ class Go2OscPushGlideDeployOracleCfg(Go2OscPushGlideDeployCfg):
         learn = False
 
     class reward_settings(Go2OscPushGlideDeployCfg.reward_settings):
-        # Keep the speed reference because the final torque-clock schedule
-        # follows it.  The warm-up removes the dominant energy/action costs
-        # below, while retaining the deploy-time clock interface.
-        speed_reference = True
+        # Directly reward the sampled command, rather than a reference that
+        # begins at the robot's reset velocity and can mask standing still.
+        speed_reference = False
 
 
 class Go2OscPushGlideDeployOracleRunnerCfg(Go2OscPushGlideDeployRunnerCfg):
