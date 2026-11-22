@@ -19,13 +19,17 @@ On the Jetson, add `--no-dev` to `uv sync`/`uv run`. The dev group pulls in
 pytest is in that group too, so skip the SDK tests there.
 
 ## Deploying to the Go2
+Step by step, wired and wireless: [DEPLOY.md](DEPLOY.md).
 - **Tethered (policy on PC):** `uv run --extra unitree_sdk python -m go2_deploy.deploy <nic> --task go2trot`
   (the actor is built from the latest run in `logs/`).
-- **Onboard (policy on the Jetson, PC over Wi-Fi):**
+- **Onboard (policy on the Jetson, sent over the cable):**
   ```bash
   uv run --frozen python scripts/export_go2_policy.py --task go2trot --name trot_v1 [--run_name <run>]
-  uv run --frozen python scripts/deploy_go2_remote.py --bundle logs/policies/trot_v1 --host unitree@10.42.0.1
-  uv run --frozen python scripts/deploy_go2_remote.py --host unitree@10.42.0.1 --pull_logs
+  # wired: sync and run now, attached in tmux
+  uv run --frozen python scripts/deploy_go2_remote.py --bundle logs/policies/trot_v1 --host unitree@192.168.123.18
+  # wireless: install, unplug, then hold L1 + R1 on the remote to start (L2 + R2 stops)
+  uv run --frozen python scripts/deploy_go2_remote.py --bundle logs/policies/trot_v1 --host unitree@192.168.123.18 --install
+  uv run --frozen python scripts/deploy_go2_remote.py --host unitree@192.168.123.18 --pull_logs
   ```
   The full procedure, RC controls and known risks are in `README_DEPLOY.md`.
 
@@ -52,7 +56,7 @@ pytest is in that group too, so skip the SDK tests there.
 - `CYCLONEDDS_HOME` must be exported for `uv sync`/`uv run` with the `unitree_sdk` extra.
 - `Actor.export()` also writes ONNX and fails without `onnxscript`; the bundle
   exporter writes TorchScript only, which is all the robot needs.
-- eduroam can't link PC and robot: use the Jetson hotspot (`10.42.0.1`) or a travel router.
+- eduroam can't link PC and robot: send the bundle over the cable, and run untethered with `--install` + `L1 + R1`.
 - The onboard run lives in tmux session `go2_deploy`; an SSH drop doesn't stop it.
   The RC's X is the e-stop, not the PC.
 - Bundles (`logs/policies/`) and `*.pt` are gitignored; move them with the deploy script.
