@@ -106,6 +106,8 @@ class CSVLogger:
                     # Full policy bundle metadata (scaling, hash, provenance),
                     # or None when the actor was built from training logs.
                     "policy_bundle": cfg.bundle_meta,
+                    # Training run of a tethered actor (None for a bundle)
+                    "policy_run_dir": cfg.run_dir,
                 },
                 f,
                 indent=2,

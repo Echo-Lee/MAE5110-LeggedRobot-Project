@@ -19,11 +19,11 @@ On the Jetson, add `--no-dev` to `uv sync`/`uv run`. The dev group pulls in
 pytest is in that group too, so skip the SDK tests there.
 
 ## Deploying to the Go2
-- **Tethered (policy on PC):** `uv run --extra unitree_sdk python -m go2_deploy.deploy <nic>`
+- **Tethered (policy on PC):** `uv run --extra unitree_sdk python -m go2_deploy.deploy <nic> --task go2trot`
   (the actor is built from the latest run in `logs/`).
 - **Onboard (policy on the Jetson, PC over Wi-Fi):**
   ```bash
-  uv run --frozen python scripts/export_go2_policy.py --name trot_v1 [--run_name <run>]
+  uv run --frozen python scripts/export_go2_policy.py --task go2trot --name trot_v1 [--run_name <run>]
   uv run --frozen python scripts/deploy_go2_remote.py --bundle logs/policies/trot_v1 --host unitree@10.42.0.1
   uv run --frozen python scripts/deploy_go2_remote.py --host unitree@10.42.0.1 --pull_logs
   ```

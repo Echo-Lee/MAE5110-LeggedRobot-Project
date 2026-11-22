@@ -7,8 +7,6 @@ from go2_deploy.unitree_remote_controller import UnitreeRemoteController, RCHand
 from go2_deploy.utility import deploy_utility
 from go2_deploy.utility.csv_logger import CSVLogger
 from go2_deploy.utility.thread import RecurrentThread
-from go2_deploy.deploy_config import DeployConfig
-from go2_deploy.utility.import_custom_impl import custom_impl
 
 import torch
 from unitree_sdk2py.core.channel import (
@@ -39,6 +37,11 @@ class MainController:
         self._shutdown_flag = False
         self.shut_down = False  # set once a requested shutdown has finished
 
+        if cfg.default_dof_pos is None:
+            raise ValueError(
+                "cfg.default_dof_pos is unset: build the policy with "
+                "setup_actor() or load_bundle() before the MainController"
+            )
         self.cfg = cfg
         self.rl_controller = rl_controller
         self.remote_controller = UnitreeRemoteController(cfg)
@@ -102,7 +105,7 @@ class MainController:
 
     # initialize student-provided custom buffers
     def _init_custom_buffers(self):
-        custom_buffers_dict = custom_impl.get_custom_buffers_dict()
+        custom_buffers_dict = self.cfg.custom_impl.get_custom_buffers_dict()
         for key, value in custom_buffers_dict.items():
             setattr(self, key, value)
 
@@ -159,7 +162,7 @@ class MainController:
 
     # Process student-provided custom buffers in control loop
     def _process_custom_buffers(self, t):
-        custom_impl.update_custom_buffers(self, t)
+        self.cfg.custom_impl.update_custom_buffers(self, t)
 
 
     # Read last lowstate msg, publish LowCmd_

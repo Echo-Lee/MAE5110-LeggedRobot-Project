@@ -6,9 +6,9 @@ scaled) observation columns through the actor loaded by
 
 Usage (from the repository root):
 
-    uv run --frozen python go2_deploy/utility/replay_actor.py 2026-08-12_11-16-05
+    uv run --frozen python go2_deploy/utility/replay_actor.py 2026-08-12_11-16-05 --task go2trot
     uv run --frozen python go2_deploy/utility/replay_actor.py \
-        logs/deploy/2026-08-12_11-16-05 --run-name <policy_run> --compare
+        logs/deploy/2026-08-12_11-16-05 --task go2trot --run-name <policy_run> --compare
 """
 
 import argparse
@@ -31,6 +31,7 @@ for _path in (_REPO_ROOT, _DEPLOY_DIR):
 
 from deploy_config import DeployConfig  # noqa: E402
 from rl_controller import setup_actor  # noqa: E402
+from go2_deploy.utility.import_custom_impl import load_custom_impl  # noqa: E402
 
 DEFAULT_LOG_ROOT = os.path.join(_REPO_ROOT, "logs", "deploy")
 CHUNK_SIZE = 4096
@@ -140,9 +141,14 @@ def main(argv=None):
         "2026-08-12_11-16-05",
     )
     parser.add_argument(
+        "--task",
+        required=True,
+        help="Task name, e.g. go2trot (selects the custom_impl)",
+    )
+    parser.add_argument(
         "--run-name",
         default=None,
-        help="Policy run under logs/<experiment> to load (default: most recent)",
+        help="Policy run under logs/<task> to load (default: most recent)",
     )
     parser.add_argument(
         "--output",
@@ -157,12 +163,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     log_dir = resolve_log_dir(args.log_dir)
-    cfg = DeployConfig()
+    custom_impl = load_custom_impl(args.task)
+    cfg = DeployConfig(custom_impl)
     columns = obs_columns(log_dir, cfg)
     rows, meta_rows, skipped = read_control_csv(log_dir, columns)
     print(f"Read {len(rows)} rows ({skipped} skipped for blank obs) from {log_dir}")
 
-    actor = setup_actor(args.run_name)
+    actor = setup_actor(args.run_name, cfg)
     if actor.num_obs != len(columns):
         raise ValueError(
             f"actor expects {actor.num_obs} observations but the log provides "

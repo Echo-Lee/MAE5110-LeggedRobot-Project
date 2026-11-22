@@ -191,11 +191,14 @@ class RCHandler:
 
 
 class Custom:
-    def __init__(self):
+    def __init__(self, task_name):
         self.low_state = None
         from go2_deploy.deploy_config import DeployConfig
+        from go2_deploy.utility.import_custom_impl import load_custom_impl
 
-        self.remoteController = UnitreeRemoteController(DeployConfig())
+        self.remoteController = UnitreeRemoteController(
+            DeployConfig(load_custom_impl(task_name))
+        )
 
     def Init(self):
         self.lowstate_subscriber = ChannelSubscriber("rt/lf/lowstate", LowState_)
@@ -208,6 +211,8 @@ class Custom:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        sys.exit(f"usage: {sys.argv[0]} <interface> <task_name>")
     print(
         "WARNING: Please ensure there are no obstacles around the robot"
         + "while running this example."
@@ -219,12 +224,9 @@ if __name__ == "__main__":
         "<Verbosity>config</Verbosity>", "<Verbosity>none</Verbosity>"
     )
 
-    if len(sys.argv) > 1:
-        ChannelFactoryInitialize(0, sys.argv[1])
-    else:
-        ChannelFactoryInitialize(0)
+    ChannelFactoryInitialize(0, sys.argv[1])
 
-    custom = Custom()
+    custom = Custom(sys.argv[2])
     custom.Init()
 
     while True:

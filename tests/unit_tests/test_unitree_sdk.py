@@ -31,6 +31,7 @@ def sdk():
 
     from go2_deploy.deploy_config import DeployConfig
     from go2_deploy.utility import deploy_utility
+    from go2_deploy.utility.import_custom_impl import load_custom_impl
 
     return SimpleNamespace(
         clients=(
@@ -42,7 +43,7 @@ def sdk():
         lowcmd_type=LowCmd_,
         lowstate_type=LowState_,
         crc=CRC(),
-        config=DeployConfig(),
+        config=DeployConfig(load_custom_impl("go2trot")),
         utility=deploy_utility,
     )
 

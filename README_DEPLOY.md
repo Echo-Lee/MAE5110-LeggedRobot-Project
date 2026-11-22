@@ -81,7 +81,7 @@ If anything goes wrong, the emergency stop on the wireless controller is X or th
 
 - Make sure your trained policy is in `logs/`, and that the observation vector, scaling, and other settings in `deploy_config.py` are all correct.
 - Turn on the Go2 and wait until it is in the standing position.
-- In the terminal, run `uv run --extra unitree_sdk python -m go2_deploy.deploy eth0`, but replace `eth0` with the actual network configuration. Keep `CYCLONEDDS_HOME` exported. If this is successful, there should be a terminal output every few seconds telling you about the keyboard controls, observation frequency, etc.
+- In the terminal, run `uv run --extra unitree_sdk python -m go2_deploy.deploy eth0 --task go2trot`, but replace `eth0` with the actual network configuration. Keep `CYCLONEDDS_HOME` exported. If this is successful, there should be a terminal output every few seconds telling you about the keyboard controls, observation frequency, etc.
 - There are 4 states the robot can be in:
     - `RECOVERY`: Initially when the script starts running, the robot is in this mode. You must enter this state from `EMERGENCY_STOP` otherwise. The default Unitree controller can be used to make the robot walk, do tricks, etc. The `F1` key on the remote control can be used to disable/enable the A, B, X, and Y buttons, so that the default Unitree button combinations can be used without accidentally turning on a different state.
     - `EMERGENCY_STOP`: The robot will immediately start damping, wait around 15 seconds, and then stand up again. The robot will automatically enter the `RECOVERY` state.
@@ -105,7 +105,7 @@ below (it reaches the code through `rt/lowstate`), with or without the PC.
    (JetPack ships 3.8), build CycloneDDS 0.10.2 as in Setup above. The first
    deploy syncs the repo; `uv run` then installs the locked aarch64 wheels.
 3. **Export a policy bundle on the PC:**
-   `uv run --frozen python scripts/export_go2_policy.py --name trot_v1 [--run_name <run>]`
+   `uv run --frozen python scripts/export_go2_policy.py --task go2trot --name trot_v1 [--run_name <run>]`
    writes `logs/policies/trot_v1/` with `policy.pt` and `deploy_meta.json`.
    The bundle carries the obs layout, every obs/action scale, the default
    posture, gains, command limits, provenance and the network's hash, so the
