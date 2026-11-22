@@ -99,7 +99,11 @@ def load_policy(args):
     cfg.init_state.reset_mode = "reset_to_basic"
     cfg.init_state.lin_vel = cfg.init_state.ang_vel = [0.0, 0.0, 0.0]
     cfg.push_robots.toggle = False
-    cfg.asset.mujoco_visual_model = None
+    # Real Go2 meshes when installed (scripts/fetch_go2_meshes.py); the
+    # backend falls back to collision shapes if they are missing. The saved
+    # configuration predates them, so set them here.
+    cfg.asset.mujoco_visual_model = "{GYM_ROOT_DIR}/resources/robots/go2/mjcf/go2.xml"
+    cfg.asset.render_offscreen = True
     cfg.terrain.static_friction = cfg.terrain.dynamic_friction = args.friction
     set_domain_randomization_range(
         cfg, "contact_friction_range", [args.friction, args.friction]
@@ -198,11 +202,17 @@ def main():
             model.vis.headlight.active = 1
             model.vis.headlight.ambient[:] = 0.6
             model.vis.headlight.diffuse[:] = 0.8
-            model.geom_rgba[model.geom_bodyid != 0] = [0.25, 0.43, 0.63, 1]
+            meshes = model.nmesh > 0  # real Go2 visuals were loaded
+            if not meshes:
+                model.geom_rgba[model.geom_bodyid != 0] = [0.25, 0.43, 0.63, 1]
             model.geom_rgba[model.geom_bodyid == 0] = [0.75, 0.78, 0.81, 1]
             renderer = mujoco.Renderer(model, height=height, width=width)
             option = mujoco.MjvOption()
             option.geomgroup[:] = 1
+            if meshes:
+                # Keep the meshes' own colors; hide the robot's collision
+                # shapes (group 3), which would otherwise overlap them.
+                option.geomgroup[3] = 0
             camera = mujoco.MjvCamera()
             camera.distance, camera.azimuth, camera.elevation = 1.8, 115, -20
             encoder_log = args.output.with_suffix(".encoder.log").open("w")

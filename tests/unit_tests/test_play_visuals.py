@@ -111,7 +111,9 @@ def test_basic_visuals_compiles_nonheadless_go2_and_preserves_physics(
 
     # The existing headless path skips the same missing visual donor. Compare
     # native physics and a short controlled rollout with the visible basic model.
-    reference_cfg.sim_dt = cfg.sim_dt
+    play.task_registry.convert_frequencies_to_params(
+        reference_cfg, Go2OscPushGlideRunnerCfg()
+    )
     reference = MuJocoCPUBackend()
     reference.setup(
         reference_cfg, num_envs=1, device="cpu", task=SimpleNamespace(headless=True)

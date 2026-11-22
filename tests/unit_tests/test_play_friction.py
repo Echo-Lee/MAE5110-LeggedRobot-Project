@@ -41,6 +41,54 @@ def test_friction_override_is_optional_and_accepts_zero():
     assert playback_args(0.4).friction == 0.4
 
 
+@pytest.mark.parametrize(
+    "task", ["go2osc_push_glide", "go2osc_push_glide_robust", "go2osc_push_glide_est"]
+)
+def test_fixed_friction_video_with_basic_visuals_survives_resets(task):
+    args = play.get_play_args(
+        [
+            "--task",
+            task,
+            "--friction",
+            "0.05",
+            "--video",
+            "unused.mp4",
+            "--basic-visuals",
+            "--num_envs",
+            "2",
+            "--seed",
+            "42",
+        ]
+    )
+    cfg, _ = play.play_cfgs(args)
+    assert cfg.asset.mujoco_visual_model is None
+    assert cfg.asset.render_offscreen
+    startup = cfg.domain_randomization.startup
+    assert startup.contact_friction_range == [0.05, 0.05]
+    assert startup.contact_friction_bins is None
+    assert startup.contact_friction_bin_weights is None
+    assert not cfg.domain_randomization.episode.resample_contact_friction
+    env = play.make_play_env(args, cfg)
+    backend = env._backend
+    try:
+        for _ in range(2):
+            env.reset()
+            for _ in range(5):
+                env.step()
+            torch.testing.assert_close(backend.contact_friction, torch.full((2,), 0.05))
+            if hasattr(env, "foot_friction_obs"):
+                torch.testing.assert_close(
+                    env.foot_friction_obs, torch.full_like(env.foot_friction_obs, 0.05)
+                )
+            for env_id in range(2):
+                backend._activate_domain(env_id)
+                model = backend._model_for_env(env_id)
+                collision = (model.geom_contype != 0) | (model.geom_conaffinity != 0)
+                np.testing.assert_allclose(model.geom_friction[collision, 0], 0.05)
+    finally:
+        backend.close()
+
+
 @pytest.mark.parametrize("friction", [None, 0.4])
 def test_saved_go2osc_native_contacts_use_playback_friction_through_reset(
     monkeypatch, friction
