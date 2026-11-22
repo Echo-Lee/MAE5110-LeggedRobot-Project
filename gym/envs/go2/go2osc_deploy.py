@@ -138,9 +138,82 @@ class Go2OscPushGlideDeploy(Go2OscPushGlideEst):
             )
         self._sensed_foot_load.copy_(load)
 
+    # ── Non-finite values ──────────────────────────────────────────────────
+    #
+    # The estimator and the actor's input normaliser are shared by every
+    # robot, so one non-finite signal can contaminate every prediction.
+    # Derived values are made finite and counted; a simulator state that
+    # is itself non-finite stops the run
+    # with the robot and signal named.
+
+    def _leg_features(self, torques, dof_vel):
+        features = super()._leg_features(torques, dof_vel)
+        if not hasattr(self, "_replaced_leg_values"):
+            self._replaced_leg_values = torch.zeros(
+                (), dtype=torch.long, device=self.device
+            )
+        finite = []
+        for value in features:
+            bad = ~torch.isfinite(value)
+            self._replaced_leg_values += bad.sum()
+            finite.append(torch.where(bad, torch.zeros_like(value), value))
+        return tuple(finite)
+
+    def _simulator_signals(self):
+        return {
+            "root_states": self.root_states,
+            "dof_pos": self.dof_pos,
+            "dof_vel": self.dof_vel,
+            "torques": self.torques,
+        }
+
+    def _stop_on_broken_simulation(self):
+        """Raise, naming robot and signal, if the simulator state is not finite."""
+        signals = self._simulator_signals()
+        finite = torch.stack(
+            [torch.isfinite(value).flatten(1).all(dim=1) for value in signals.values()]
+        )
+        if bool(finite.all()):
+            return
+        broken = (~finite).any(dim=0).nonzero().flatten()
+        robot = int(broken[0])
+        names = [name for name, ok in zip(signals, finite[:, robot]) if not ok]
+        raise FloatingPointError(
+            f"simulator state of robot {robot} is not finite ({', '.join(names)}); "
+            f"{len(broken)} of {self.num_envs} robots affected. "
+            f"Episode time {float(self.episode_length_buf[robot] * self.dt):.2f} s, "
+            f"command {self.commands[robot].tolist()}, "
+            f"foot friction {self.foot_friction_obs[robot].tolist()}."
+        )
+
+    def guard_counts(self):
+        """Non-finite values handled so far (one GPU read): name -> count."""
+        return {
+            "leg_values_replaced": int(getattr(self, "_replaced_leg_values", 0)),
+            "estimator_inputs_replaced": int(self.estimator.replaced_values),
+            "estimator_samples_dropped": int(self.estimator.dropped_samples),
+            "estimator_steps_skipped": int(self.estimator.skipped_steps),
+        }
+
+    def _report_estimator_loss(self):
+        updates = self.estimator.updates
+        if updates < self._estimator_updates_reported + 50:
+            return
+        self._estimator_updates_reported = updates
+        loss = self.estimator.last_loss
+        loss = "none yet" if loss is None else f"{loss:.4f}"
+        print(f"[state estimator] update {updates}: loss {loss}", flush=True)
+        counts = self.guard_counts()
+        if counts != getattr(self, "_guard_counts_reported", None) and any(
+            counts.values()
+        ):
+            self._guard_counts_reported = counts
+            print(f"[go2osc guard] non-finite values handled: {counts}", flush=True)
+
     # ── Step and reset ─────────────────────────────────────────────────────
 
     def _post_decimation_step(self):
+        self._stop_on_broken_simulation()
         super()._post_decimation_step()  # ends with the estimator's step
         self._refresh_onboard_push_signal()
 

@@ -62,8 +62,26 @@ PYTHONPATH=. uv run --frozen --extra gpu python scripts/train.py \
     --experiment_name go2osc_push_glide_deploy --headless --disable_wandb
 ```
 
-4000 iterations, as for the robust runs. This task has not been trained
-yet: check the result before the robot does.
+The policy and estimator train together from scratch. Evaluate the saved
+checkpoint before exporting it for a hardware test.
+
+### Numerical guards
+
+The estimator and actor normalizer are shared across environments. Invalid
+sensor-derived values must be contained before they reach those shared
+modules.
+
+| Signal or update | Handling |
+|---|---|
+| Estimator input frames | Replace non-finite entries with zero; bound scaled inputs to ±1e4 |
+| Estimator training labels | Drop samples with non-finite labels |
+| Estimator gradients | Skip non-finite gradient steps |
+| Derived foot forces and velocities | Replace non-finite entries with zero |
+| Primary simulator state | Stop with the affected environment, signal, command, friction and episode time |
+
+Guard counters are reported alongside estimator losses when they change.
+Use these diagnostics to locate invalid inputs; sanitization does not
+establish that the simulator or learned policy is behaving correctly.
 
 ## Check and export
 

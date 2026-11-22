@@ -285,6 +285,12 @@ class EstimatorInTheLoop:
         self.env.contact_friction = clipped.unsqueeze(1)
 
 
+# Bound on an estimator input, in the scaled units get_states returns
+# (real signals stay below about 100). A simulator fault can produce
+# readings many orders above it.
+FEATURE_LIMIT = 1.0e4
+
+
 class ConcurrentEstimator:
     """An estimator run, and optionally trained, inside an environment.
 
@@ -327,6 +333,12 @@ class ConcurrentEstimator:
         self.updates = 0
         self.last_loss = None
         self._windows, self._targets = [], []
+        # Guard counters (device tensors: counting never waits for the GPU).
+        # One non-finite sample would turn every weight into NaN, and with
+        # them the estimates of every robot.
+        self.replaced_values = torch.zeros((), dtype=torch.long, device=device)
+        self.dropped_samples = torch.zeros((), dtype=torch.long, device=device)
+        self.skipped_steps = 0
         self.mu_hat = torch.zeros(num_envs, device=device)
         self.v_hat = torch.zeros(num_envs, 3, device=device)
 
@@ -357,7 +369,7 @@ class ConcurrentEstimator:
         self._windows, self._targets = [], []
 
     def reset(self, mask, features):
-        self.history.reset(mask, features)
+        self.history.reset(mask, self._finite(features))
         self._predict()
 
     def step(self, features, targets=None, noise_std=None):
@@ -367,7 +379,7 @@ class ConcurrentEstimator:
         """
         if noise_std is not None:
             features = features + noise_std * torch.randn_like(features)
-        self.history.append(features)
+        self.history.append(self._finite(features))
         window = self._predict()
         if not self.learning or targets is None:
             return
@@ -378,6 +390,15 @@ class ConcurrentEstimator:
         self._targets.append(targets[picked])
         if len(self._windows) >= self.update_interval:
             self._update()
+
+    def _finite(self, features):
+        """Features with non-finite entries zeroed and absurd ones bounded."""
+        bad = ~torch.isfinite(features)
+        bounded = torch.where(bad, torch.zeros_like(features), features).clamp(
+            -FEATURE_LIMIT, FEATURE_LIMIT
+        )
+        self.replaced_values += (bounded != features).sum()
+        return bounded
 
     def _predict(self):
         window = self.history.window()
@@ -390,12 +411,23 @@ class ConcurrentEstimator:
             windows = torch.cat(self._windows).clone()
             targets = torch.cat(self._targets).clone()
             self._windows, self._targets = [], []
+            # A sample without a finite label (a robot whose simulation
+            # broke) teaches nothing and would poison the whole update.
+            usable = torch.isfinite(windows).all(dim=1) & (
+                torch.isfinite(targets).all(dim=1)
+            )
+            self.dropped_samples += (~usable).sum()
+            windows, targets = windows[usable], targets[usable]
+            if windows.shape[0] == 0:
+                self.skipped_steps += self.gradient_steps
+                return
             if self.unnormalized_inputs is not None:
                 # Running average of the batch statistics, then frozen.
                 new = self.unnormalized_inputs
                 rate = 1.0 / (self._normalization_batches + 1)
                 mean = windows[:, new].mean(dim=0)
-                std = windows[:, new].std(dim=0).clamp_min(1e-3)
+                correction = 0 if windows.shape[0] == 1 else 1
+                std = windows[:, new].std(dim=0, correction=correction).clamp_min(1e-3)
                 model = self.model
                 model.input_mean[new] = torch.lerp(model.input_mean[new], mean, rate)
                 blended = torch.lerp(model.input_std[new], std, rate)
@@ -409,10 +441,19 @@ class ConcurrentEstimator:
                 loss = self.model.loss(windows[chunk], targets[chunk])
                 self.optimizer.zero_grad()
                 loss.backward()
+                norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), float("inf")
+                )
+                if not torch.isfinite(norm):
+                    # As in PPO2: one non-finite gradient step would turn
+                    # every weight into NaN.
+                    self.optimizer.zero_grad()
+                    self.skipped_steps += 1
+                    continue
                 self.optimizer.step()
+                self.last_loss = loss.item()
             self.model.eval()
         self.updates += 1
-        self.last_loss = loss.item()
 
     def state_dict(self):
         return {
