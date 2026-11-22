@@ -175,24 +175,28 @@ def _(mo):
     mo.md("""
     ## W&B authentication
 
-    Add `WANDB_API_KEY` as a MoLab secret/environment variable, then run the
-    next cell. The key is read only from the runtime environment and is never
-    printed or written into this notebook.
+    Paste your W&B API key into the next cell, then run it. The key is not
+    printed; clear the value again before sharing the notebook.
     """)
     return
 
 
 @app.cell
-def _(ENV, os):
-    _wandb_key = os.environ.get("WANDB_API_KEY", "").strip()
+def _():
+    WANDB_API_KEY = ""  # Paste your W&B API key between these quotes.
+    return (WANDB_API_KEY,)
+
+
+@app.cell
+def _(ENV, WANDB_API_KEY):
+    _wandb_key = WANDB_API_KEY.strip()
     if not _wandb_key:
         raise RuntimeError(
-            "Set the WANDB_API_KEY MoLab secret before running training."
+            "Paste your W&B API key into the authentication input cell first."
         )
-    # The training subprocess inherits ENV; retain the secret there even when
-    # the host subsequently changes its process environment.
+    # The training subprocess inherits ENV. Never print the key.
     ENV["WANDB_API_KEY"] = _wandb_key
-    print("W&B API key loaded from the runtime secret.")
+    print("W&B API key loaded for this runtime.")
     return
 
 
