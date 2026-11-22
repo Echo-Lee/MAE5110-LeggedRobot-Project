@@ -26,7 +26,6 @@ from gym.envs.go2.go2osc_config import (
 from gym.envs.go2.go2osc_est_config import (
     ESTIMATE_OBSERVATIONS,
     Go2OscPushGlideEstCfg,
-    TRUE_STATE_OBSERVATIONS,
 )
 from gym.envs.go2.go2osc_posture_config import Go2OscPushGlidePostureRunnerCfg
 
@@ -98,46 +97,3 @@ class Go2OscPushGlideDeployRunnerCfg(Go2OscPushGlideRobustRunnerCfg):
 
     class runner(Go2OscPushGlideRobustRunnerCfg.runner):
         experiment_name = "go2osc_push_glide_deploy"
-
-
-class Go2OscPushGlideDeployOracleCfg(Go2OscPushGlideDeployCfg):
-    """Stage-one gait task with final-deployment sensing and oracle state.
-
-    Commands and ground friction remain randomized.  Only the two estimates
-    supplied to the actor are replaced by the simulator labels, so a trained
-    actor has exactly the same input/output dimensions as the deploy actor.
-    """
-
-    class commands(Go2OscPushGlideDeployCfg.commands):
-        # Learn sustained commanded locomotion before adding slide-stop
-        # behaviour.  Forward/lateral/yaw commands remain randomly sampled.
-        sliding_stop_probability = 0.0
-
-    class fast_slides(Go2OscPushGlideDeployCfg.fast_slides):
-        probability = 0.0
-
-    class state_estimator(Go2OscPushGlideDeployCfg.state_estimator):
-        # Stage two trains it from this policy's rollouts.
-        learn = False
-
-    class reward_settings(Go2OscPushGlideDeployCfg.reward_settings):
-        # Directly reward the sampled command, rather than a reference that
-        # begins at the robot's reset velocity and can mask standing still.
-        speed_reference = False
-
-
-class Go2OscPushGlideDeployOracleRunnerCfg(Go2OscPushGlideDeployRunnerCfg):
-    class actor(Go2OscPushGlideDeployRunnerCfg.actor):
-        obs = PHASE_OBSERVATIONS + TRUE_STATE_OBSERVATIONS + ["clock_speed_obs"]
-
-    class critic(Go2OscPushGlideDeployRunnerCfg.critic):
-        class reward(Go2OscPushGlideDeployRunnerCfg.critic.reward):
-            class weights(Go2OscPushGlideDeployRunnerCfg.critic.reward.weights):
-                # Do not price out the first useful gait.  These are restored
-                # when fine-tuning the deploy task.
-                cost_of_transport = 0.0
-                action_rate = 0.002
-                action_rate2 = 0.0002
-
-    class runner(Go2OscPushGlideDeployRunnerCfg.runner):
-        experiment_name = "go2osc_push_glide_deploy_oracle"

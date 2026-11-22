@@ -45,7 +45,6 @@ config_dict = {
     "Go2OscPushGlideRobustCfg": ".go2.go2osc_config",
     "Go2OscPushGlideEstCfg": ".go2.go2osc_est_config",
     "Go2OscPushGlideDeployCfg": ".go2.go2osc_deploy_config",
-    "Go2OscPushGlideDeployOracleCfg": ".go2.go2osc_deploy_config",
     "Go2OscPushGlidePostureCfg": ".go2.go2osc_posture_config",
 }
 
@@ -69,7 +68,6 @@ runner_config_dict = {
     "Go2OscPushGlideRobustRunnerCfg": ".go2.go2osc_config",
     "Go2OscPushGlideEstRunnerCfg": ".go2.go2osc_est_config",
     "Go2OscPushGlideDeployRunnerCfg": ".go2.go2osc_deploy_config",
-    "Go2OscPushGlideDeployOracleRunnerCfg": ".go2.go2osc_deploy_config",
     "Go2OscPushGlideBlindRunnerCfg": ".go2.go2osc_est_config",
     "Go2OscPushGlideOracleRunnerCfg": ".go2.go2osc_est_config",
     "Go2OscPushGlidePostureRunnerCfg": ".go2.go2osc_posture_config",
@@ -138,11 +136,6 @@ task_dict = {
         "Go2OscPushGlideDeploy",
         "Go2OscPushGlideDeployCfg",
         "Go2OscPushGlideDeployRunnerCfg",
-    ],
-    "go2osc_push_glide_deploy_oracle": [
-        "Go2OscPushGlideDeploy",
-        "Go2OscPushGlideDeployOracleCfg",
-        "Go2OscPushGlideDeployOracleRunnerCfg",
     ],
     "go2osc_push_glide_blind": [
         "Go2OscPushGlideEst",
