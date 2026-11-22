@@ -309,10 +309,16 @@ class ConcurrentEstimator:
         samples_per_step=256,
         update_interval=24,
         gradient_steps=4,
+        normalization_updates=1,
     ):
         self.num_envs = num_envs
         self.device = device
         self.learning_rate = learning_rate
+        # Updates over which unnormalized inputs keep averaging their
+        # mean/std before those freeze. 1 takes them from the first batch;
+        # more suits an estimator trained from scratch beside a policy
+        # whose first states (falling over) differ from the later ones.
+        self.normalization_updates = max(1, int(normalization_updates))
         self.set_model(model)
         self.samples_per_step = min(samples_per_step, num_envs)
         self.update_interval = update_interval
@@ -347,6 +353,7 @@ class ConcurrentEstimator:
         self.unnormalized_inputs = (
             None if unnormalized_inputs is None else unnormalized_inputs.to(self.device)
         )
+        self._normalization_batches = 0
         self._windows, self._targets = [], []
 
     def reset(self, mask, features):
@@ -384,10 +391,18 @@ class ConcurrentEstimator:
             targets = torch.cat(self._targets).clone()
             self._windows, self._targets = [], []
             if self.unnormalized_inputs is not None:
+                # Running average of the batch statistics, then frozen.
                 new = self.unnormalized_inputs
-                self.model.input_mean[new] = windows[:, new].mean(dim=0)
-                self.model.input_std[new] = windows[:, new].std(dim=0).clamp_min(1e-3)
-                self.unnormalized_inputs = None
+                rate = 1.0 / (self._normalization_batches + 1)
+                mean = windows[:, new].mean(dim=0)
+                std = windows[:, new].std(dim=0).clamp_min(1e-3)
+                model = self.model
+                model.input_mean[new] = torch.lerp(model.input_mean[new], mean, rate)
+                blended = torch.lerp(model.input_std[new], std, rate)
+                model.input_std[new] = blended.clamp_min(1e-3)
+                self._normalization_batches += 1
+                if self._normalization_batches >= self.normalization_updates:
+                    self.unnormalized_inputs = None
             self.model.train()
             order = torch.randperm(windows.shape[0], device=self.device)
             for chunk in order.chunk(self.gradient_steps):

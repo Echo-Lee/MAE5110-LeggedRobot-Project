@@ -5,15 +5,17 @@ from go2_deploy.utility.import_custom_impl import custom_impl
 
 
 class DeployConfig:
-    task_name = "go2osc_wide_deploy_robust"
+    task_name = "go2osc_push_glide_deploy"
 
     ctrl_freq = 100  # Hz
 
     kp = 30.0  # Default stiffness constant
     kd = 2.0  # Default damping constant
 
-    # Apply exponential moving average to actions
-    exp_moving_avg = True
+    # Apply exponential moving average to actions. Off: the go2osc_push_glide
+    # policy was trained without it, and its implementation refuses to run
+    # with it on.
+    exp_moving_avg = False
     ema_time_const = 0.095      # seconds
     ema_smoothing_factor = -np.expm1(-(1/ctrl_freq)/ema_time_const)     # alpha in EMA
 
