@@ -175,15 +175,17 @@ def _(mo):
     mo.md("""
     ## W&B authentication
 
-    Paste your W&B API key into the next cell, then run it. The key is not
-    printed; clear the value again before sharing the notebook.
+    Run the next cell and enter your W&B API key at its hidden stdin prompt.
+    The key is not printed or stored in the notebook.
     """)
     return
 
 
 @app.cell
 def _():
-    WANDB_API_KEY = ""  # Paste your W&B API key between these quotes.
+    import getpass
+
+    WANDB_API_KEY = getpass.getpass("Enter W&B API key: ")
     return (WANDB_API_KEY,)
 
 
@@ -192,7 +194,7 @@ def _(ENV, WANDB_API_KEY):
     _wandb_key = WANDB_API_KEY.strip()
     if not _wandb_key:
         raise RuntimeError(
-            "Paste your W&B API key into the authentication input cell first."
+            "Enter your W&B API key in the preceding input prompt first."
         )
     # The training subprocess inherits ENV. Never print the key.
     ENV["WANDB_API_KEY"] = _wandb_key
