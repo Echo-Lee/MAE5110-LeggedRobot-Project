@@ -143,13 +143,25 @@ def load_widened(env, runner, checkpoint):
     runner.it = int(saved["iter"])
 
 
-def act(env, runner):
+def act(env, runner, record=None):
+    """One policy step, then reset finished envs as PPO's rollout does.
+
+    env.step() never resets: falls and timeouts are reset by the runner,
+    which also resamples friction and restarts the estimator's history and
+    accelerometer bias. ``record`` runs between the step and that reset, so
+    terminal states are measured. Returns the (timed_out, terminated) masks.
+    """
     runner.set_actions(
         runner.actor_cfg["actions"],
         runner.get_inference_actions(),
         runner.actor_cfg["disable_actions"],
     )
     env.step()
+    timed_out, terminated = env.timed_out.clone(), env.terminated.clone()
+    if record is not None:
+        record()
+    runner.reset_envs()
+    return timed_out, terminated
 
 
 def set_normalization(env, runner, steps=200, start=50):
@@ -185,15 +197,21 @@ def train(env, runner, steps):
 def evaluate(env, runner, steps):
     """Fresh episodes, learning off: per-step truth and estimates."""
     env.reset()
-    rows = {k: [] for k in ("mu", "mu_hat", "v", "v_hat", "t_reset", "t_switch")}
-    for _ in range(steps):
-        act(env, runner)
+    keys = ("mu", "mu_hat", "v", "v_hat", "t_reset", "t_switch")
+    rows = {k: [] for k in keys + ("timed_out", "terminated")}
+
+    def record():  # after the step, before finished envs are reset
         rows["mu"].append(env._backend.contact_friction.clone())
         rows["mu_hat"].append(env.estimator.mu_hat.clone())
         rows["v"].append(env.base_lin_vel.clone())
         rows["v_hat"].append(env.estimator.v_hat.clone())
         rows["t_reset"].append(env.episode_length_buf * env.dt)
         rows["t_switch"].append(env.time_since_friction_change.clone())
+
+    for _ in range(steps):
+        timed_out, terminated = act(env, runner, record)
+        rows["timed_out"].append(timed_out)
+        rows["terminated"].append(terminated)
     return {k: torch.stack(v).cpu().numpy() for k, v in rows.items()}
 
 
@@ -211,10 +229,18 @@ def metrics(trace):
         "mu_mae_by_time_since_switch_s": {},
         "v_rmse_xyz_m_s": np.sqrt((v_err**2).mean(axis=0)).tolist(),
         "v_rmse_predict_mean_baseline_xyz_m_s": trace["v"][keep].std(axis=0).tolist(),
+        # Absent from traces saved before evaluation reset finished envs.
+        "episodes_timed_out": (
+            int(trace["timed_out"].sum()) if "timed_out" in trace else None
+        ),
+        "episodes_terminated": (
+            int(trace["terminated"].sum()) if "terminated" in trace else None
+        ),
     }
     for low, high in ((0.1, 0.3), (0.3, 0.6), (0.6, 1.0)):
         band = (mu >= low) & (mu <= high)
-        out["mu_mae_by_true_mu"][f"{low}-{high}"] = float(err[band].mean())
+        if band.any():
+            out["mu_mae_by_true_mu"][f"{low}-{high}"] = float(err[band].mean())
     for low, high in ((0.0, 0.25), (0.25, 0.5), (0.5, 1.0), (1.0, 99.0)):
         band = (after_switch >= low) & (after_switch < high)
         if band.any():
