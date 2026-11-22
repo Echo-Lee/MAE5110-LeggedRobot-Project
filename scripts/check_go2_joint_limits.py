@@ -218,6 +218,35 @@ def main():
                 "time_target_past_stop": push,
             }
         )
+    # Keep the condition-level failures: aggregate joint ranges can hide a
+    # rare but repeatable low-friction / turning failure mode.
+    scenario_rows = []
+    for env_id in range(env.num_envs):
+        count = int(past[env_id].sum().item())
+        if not count:
+            continue
+        joints = [
+            names[index]
+            for index, value in enumerate(past[env_id].tolist())
+            if value
+        ]
+        scenario_rows.append(
+            {
+                "friction": float(friction[env_id]),
+                "command_before_stop": before[env_id].tolist(),
+                "command_after_stop": after[env_id].tolist(),
+                "joint_step_violations": count,
+                "joints": joints,
+            }
+        )
+    if scenario_rows:
+        print("\nActual-limit violations by scenario:")
+        for row in sorted(scenario_rows, key=lambda item: -item["joint_step_violations"]):
+            print(
+                f"  mu={row['friction']:.2f}  before={row['command_before_stop']} "
+                f"after={row['command_after_stop']}  "
+                f"joint-steps={row['joint_step_violations']}  {row['joints']}"
+            )
     print("RESULT:", "outside the limits" if failed else "inside the limits")
     if arguments.json:
         arguments.json.write_text(
@@ -229,6 +258,7 @@ def main():
                     "rollouts": env.num_envs,
                     "inside": not failed,
                     "joints": rows,
+                    "violation_scenarios": scenario_rows,
                 },
                 indent=2,
             )

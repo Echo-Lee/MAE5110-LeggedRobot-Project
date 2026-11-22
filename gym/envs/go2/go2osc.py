@@ -1443,9 +1443,21 @@ class Go2OscPushGlide(Go2OscSpeedTargetMixin, Go2OscDirectional):
         """
         limit = getattr(self.cfg.control, "action_limit", None)
         if limit is None:
+            bound = None
+        else:
+            bound = limit * self.scales["dof_pos_target"]
+            self.dof_pos_target.clamp_(-bound, bound)
+        # Optional physical-stop guard.  Unlike action_limit (an offset
+        # bound), this clamps the absolute desired joint angle to the URDF
+        # range, leaving `joint_target_margin` radians before either stop.
+        margin = getattr(self.cfg.control, "joint_target_margin", None)
+        if margin is None:
             return
-        bound = limit * self.scales["dof_pos_target"]
-        self.dof_pos_target.clamp_(-bound, bound)
+        limits = self.dof_pos_limits.index_select(0, self.actuated_dof_indices)
+        lower, upper = limits[:, 0] + margin, limits[:, 1] - margin
+        default = self.default_dof_pos.index_select(1, self.actuated_dof_indices)
+        target = (default + self.dof_pos_target).clamp(lower, upper)
+        self.dof_pos_target.copy_(target - default)
 
     def _slow_command_mask(self):
         """Standing clocks only when no command asks the robot to move.

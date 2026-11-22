@@ -504,6 +504,8 @@ class Go2OscPushGlideRobustCfg(Go2OscPushGlideCotCfg):
         # Time from a joint target leaving the policy to the motors acting on
         # it [s]; one value per robot and episode.
         actuation_delay_range = [0.0, 0.02]
+        # Match the final hardware guard during simulation and fine-tuning.
+        joint_target_margin = 0.05
 
     class push_robots(Go2OscPushGlideCotCfg.push_robots):
         interval_s = 5
