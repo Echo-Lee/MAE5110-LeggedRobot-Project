@@ -4,6 +4,7 @@ isaacgym/*
 *venv*
 logs/
 artifacts/
+go2osc_robust_carve_4000_checkpoint_bundle/
 gym/scripts/wandb/
 .idea/
 gpuGym.egg-info/
