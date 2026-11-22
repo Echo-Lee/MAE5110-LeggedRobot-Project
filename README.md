@@ -2,9 +2,10 @@
 
 Clone the repo:
 
-```git clone https://github.com/LampLighterLab/BigRedGym.git```
-
-Then, enter the BigRedGym folder.
+```sh
+git clone https://github.com/Echo-Lee/MAE5110-LeggedRobot-Project.git
+cd MAE5110-LeggedRobot-Project
+```
 
 Create the venv using uv:
 
@@ -156,40 +157,73 @@ uv run --frozen --extra gpu python scripts/train.py \
 Checkpoints are saved under `logs/go2osc_push_glide/`. For a small CPU run,
 use `--device cpu --num_envs 16`; full training is intended for a GPU.
 
-## Play the included policy
+## Play a trained policy
 
-The trained checkpoint is [policies/go2osc_push_glide/model_500.pt](policies/go2osc_push_glide/model_500.pt).
-Its configuration and training metadata are recorded in
-[policy.json](policies/go2osc_push_glide/policy.json).
-This checkpoint's saved configuration uses the forward-only oscillator
-schedule and has no tilt-rate reward. `scripts/play.py` uses current task
-defaults, including the steering schedule; the recorder below restores
-the checkpoint's saved configuration.
-Install the standard dependencies with `uv sync --frozen`, then run one of
-these commands from the repository root.
+Checkpoints and generated artifacts are not bundled. After training, install
+standard dependencies with `uv sync --frozen`, then select a checkpoint from
+`logs/go2osc_push_glide/`. Use `--load_run <run-directory>` to select a specific
+run; omitting it selects the latest run in the experiment.
 
 macOS requires `mjpython` for the viewer:
 
 ```sh
-uv run --frozen mjpython scripts/play.py \
+PYTHONPATH=. uv run --frozen mjpython scripts/play.py \
     --task go2osc_push_glide --backend mujoco --device cpu --num_envs 1 \
-    --experiment_name "$PWD/policies" --load_run go2osc_push_glide \
-    --checkpoint 500 --seed 123
+    --experiment_name go2osc_push_glide --checkpoint 500 --original_cfg \
+    --basic-visuals --seed 123 --keyboard
 ```
 
-On Linux, use Python:
-
-```sh
-uv run --frozen python scripts/play.py \
-    --task go2osc_push_glide --backend mujoco --device cpu --num_envs 1 \
-    --experiment_name "$PWD/policies" --load_run go2osc_push_glide \
-    --checkpoint 500 --seed 123
-```
+On Linux, replace `mjpython` with `python`. `--basic-visuals` uses the included
+collision geometry without optional mesh assets. Add `--friction 0.05` to test
+on fixed-friction ground.
 
 Playback starts at 1 m/s forward. Press **I/K** to adjust forward velocity,
 **J/L** for lateral velocity, **N/M** for yaw, **R** to reset, and **Esc** to
-quit. Releasing a key keeps the selected command. Playback samples friction
-from the policy's training range.
+quit. Releasing a key keeps the selected command.
+
+## Robust locomotion and curved stop targets
+
+`go2osc_push_glide_robust` adds changing ground friction, sensor errors,
+actuation delay, varied mass and motor gains, and fast sliding-stop starts.
+The actor has 66 inputs; the critic has 75, including true per-foot friction.
+The actor receives a noisy, lagged simulated friction estimate and a forward
+speed target used by the oscillator schedule. A hardware friction estimator
+is not included.
+
+Ground friction spans `[0.05, 1.0]`, and forward commands span `[-1.0, 2.0]` m/s,
+with standing and turning samples. The six-second episodes include zero-speed
+commands with a requested yaw rate. During those stops, the velocity reference
+shares a `0.9 * friction * gravity` acceleration budget, capped at 5 m/s²,
+between turning and braking, retaining at least half for braking. The yaw
+target is capped by this budget. These are training targets; foot sliding is
+not directly rewarded.
+
+Train on Linux with a working NVIDIA GPU:
+
+```sh
+uv sync --frozen --extra gpu
+PYTHONPATH=. uv run --frozen --extra gpu python scripts/train.py \
+    --task go2osc_push_glide_robust --backend mujoco --device cuda:0 \
+    --num_envs 4096 --max_iterations 4000 --save_interval 50 --seed 0 \
+    --experiment_name go2osc_push_glide_robust --headless --disable_wandb
+```
+
+For a small CPU smoke run, use `--device cpu --num_envs 16 --max_iterations 1`.
+Checkpoints and saved configurations are written below
+`logs/go2osc_push_glide_robust/`.
+
+After training, play checkpoint 4000 on macOS:
+
+```sh
+PYTHONPATH=. uv run --frozen mjpython scripts/play.py \
+    --task go2osc_push_glide_robust --backend mujoco --device cpu --num_envs 1 \
+    --experiment_name go2osc_push_glide_robust --checkpoint 4000 --original_cfg \
+    --basic-visuals --seed 123 --keyboard
+```
+
+On Linux, replace `mjpython` with `python`. Add `--load_run <run-directory>` to
+select a particular run, or `--friction 0.05` for a fixed low-friction surface.
+The keyboard controls above also apply to this task.
 
 ## Go2 visuals and video recording
 
@@ -220,13 +254,17 @@ uv run --frozen python scripts/play.py --task go2osc_push_glide \
 
 ## Record acceleration and a zero-command stop
 
+The retained recorder accepts an existing compatible policy bundle through
+`--policy-dir`. The directory must contain `policy.json` and its referenced
+checkpoint and JSON configuration. Policy bundles are not included in this
+repository.
+
 Install `ffmpeg` (`brew install ffmpeg` on macOS or `sudo apt install ffmpeg`
-on Ubuntu). The recorder loads the included checkpoint and its saved
-configuration, fixes ground friction, starts from rest, and keeps the same
-policy active when the velocity command becomes zero.
+on Ubuntu), then record a bundle from rest on fixed-friction ground:
 
 ```sh
 uv run --frozen mjpython scripts/record_go2osc_stop.py \
+    --policy-dir path/to/policy_bundle \
     --friction 0.05 --speed 2.5 --switch-time 14 --duration 26
 ```
 
@@ -236,8 +274,7 @@ NumPy motion records are saved under `artifacts/go2osc/command_stop.*`.
 Use `--output artifacts/go2osc/my_stop.mp4` to choose another filename, or
 `--no-video` to save motion data without rendering or requiring `ffmpeg`.
 
-`--speed` specifies the commanded forward velocity; the overlay also shows
-the measured speed. Friction 0.05 and a 2.5 m/s command are outside this
-checkpoint's training ranges. No controller or reward changes are applied
-during recording. For a gradual command increase, add
+`--speed` specifies commanded forward velocity; the overlay also shows measured
+speed. Choose friction and commands appropriate to the bundle's training range.
+For a gradual command increase, add
 `--ramp-start-speed 1.5 --ramp-start-time 6 --ramp-end-time 12`.

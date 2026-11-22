@@ -566,6 +566,8 @@ def test_push_glide_variant_changes_only_declared_signals_inputs_and_rewards():
     assert variant["osc"].pop("sideways_stop_threshold") == 0.1
     assert variant["osc"].pop("turning_stop_threshold") == 0.1
     assert variant["reward_settings"].pop("tilt_rate_cap") == 4.0
+    assert variant["reward_settings"].pop("cost_of_transport_min_speed") == 0.5
+    assert variant["reward_settings"].pop("cost_of_transport_cap") == 5.0
     assert variant["control"].pop("action_limit") == 10.0
     assert variant["scaling"].pop("foot_traction_obs") == 1.0
     assert variant["scaling"].pop("contact_friction_obs") == 1.0
@@ -606,6 +608,7 @@ def test_push_glide_variant_changes_only_declared_signals_inputs_and_rewards():
     assert weights["lin_vel_z"] == 2.0
     weights["lin_vel_z"] = 0.0
     assert weights.pop("tilt_rate") == 1.0
+    assert weights.pop("cost_of_transport") == 0.0
     assert variant == baseline
 
 
@@ -624,6 +627,75 @@ def test_frequency_variants_change_only_the_moving_scale_and_experiment(suffix, 
     variant["runner"]["experiment_name"] = baseline["runner"]["experiment_name"]
     assert variant == baseline
     assert task_registry.get_task_class(name) is Go2OscPushGlide
+
+
+def test_cost_of_transport_is_power_per_weight_and_commanded_speed():
+    env = _env(4)
+    env.actuated_dof_indices = torch.tensor([0, 2])
+    env.dof_vel = torch.tensor([[2.0, 9.0, -3.0]]).repeat(4, 1)
+    env.torques = torch.tensor([[5.0, 4.0]]).repeat(4, 1)
+    # Forward, diagonal, slower than the floor, and a turn in place.
+    env.commands = torch.tensor(
+        [[1.0, 0.0, 0.0], [0.6, 0.8, 0.0], [0.2, 0.0, 0.0], [0.0, 0.0, 0.5]]
+    )
+    power = 5.0 * 2.0 + 4.0 * 3.0  # both joints count, whatever the sign
+    assert env.cfg.reward_settings.cost_of_transport_min_speed == 0.5
+    expected = -power / (WEIGHT * torch.tensor([1.0, 1.0, 0.5, 0.5]))
+    torch.testing.assert_close(env._reward_cost_of_transport(), expected)
+    # Twice the commanded speed for the same power halves the charge.
+    env.commands[0, 0] = 2.0
+    torch.testing.assert_close(
+        env._reward_cost_of_transport()[0], torch.tensor(-power / (WEIGHT * 2.0))
+    )
+    # A thrashing robot costs no more than the cap.
+    env.torques[1] = torch.tensor([40.0, 40.0])
+    env.dof_vel[1] = torch.tensor([60.0, 0.0, -60.0])
+    assert env.cfg.reward_settings.cost_of_transport_cap == 5.0
+    torch.testing.assert_close(env._reward_cost_of_transport()[1], torch.tensor(-5.0))
+
+
+@pytest.mark.parametrize(
+    "name", ["cost_of_transport_min_speed", "cost_of_transport_cap"]
+)
+@pytest.mark.parametrize("value", [0.0, -0.5, float("nan"), float("inf"), True])
+def test_invalid_cost_of_transport_settings_fail_before_simulation(name, value):
+    cfg = configs.Go2OscPushGlideCfg()
+    setattr(cfg.reward_settings, name, value)
+    with pytest.raises(ValueError, match=name):
+        Go2OscPushGlide._validate_push_glide_cfg(cfg)
+
+
+def test_cot_variant_adds_only_the_energy_charge_and_tighter_speed_tracking():
+    baseline = class_to_dict(configs.Go2OscPushGlideCfg())
+    variant = class_to_dict(configs.Go2OscPushGlideCotCfg())
+    assert baseline["reward_settings"]["velocity_tracking_tolerance"] is None
+    assert variant["reward_settings"]["velocity_tracking_tolerance"] == 0.5
+    variant["reward_settings"]["velocity_tracking_tolerance"] = None
+    assert variant == baseline
+    baseline = class_to_dict(configs.Go2OscPushGlideRunnerCfg())
+    variant = class_to_dict(configs.Go2OscPushGlideCotRunnerCfg())
+    assert variant["runner"]["experiment_name"] == "go2osc_push_glide_cot"
+    variant["runner"]["experiment_name"] = baseline["runner"]["experiment_name"]
+    weights = variant["critic"]["reward"]["weights"]
+    assert baseline["critic"]["reward"]["weights"]["cost_of_transport"] == 0.0
+    assert weights["cost_of_transport"] == 1.0
+    weights["cost_of_transport"] = 0.0
+    assert variant == baseline
+
+
+def test_cot_mu_variant_differs_only_by_telling_the_actor_the_friction():
+    assert class_to_dict(configs.Go2OscPushGlideCotMuCfg()) == class_to_dict(
+        configs.Go2OscPushGlideCotCfg()
+    )
+    baseline = class_to_dict(configs.Go2OscPushGlideCotRunnerCfg())
+    variant = class_to_dict(configs.Go2OscPushGlideCotMuRunnerCfg())
+    assert variant["runner"]["experiment_name"] == "go2osc_push_glide_cot_mu"
+    variant["runner"]["experiment_name"] = baseline["runner"]["experiment_name"]
+    assert variant["actor"]["obs"] == baseline["actor"]["obs"] + [
+        "contact_friction_obs"
+    ]
+    variant["actor"]["obs"] = baseline["actor"]["obs"]
+    assert variant == baseline
 
 
 def test_command_ranges_stay_within_the_grip_of_the_lowest_friction():
@@ -807,6 +879,41 @@ def test_native_relative_foot_velocity_depends_on_joints_not_base_motion():
         torch.testing.assert_close(still, world_still, atol=2e-5, rtol=0)
         torch.testing.assert_close(moving, still, atol=5e-5, rtol=0)
         assert (world_moving - world_still).norm(dim=-1).min() > 0.3
+    finally:
+        backend.close()
+
+
+def test_native_cot_mu_actor_sees_the_applied_friction_and_is_charged_for_power():
+    cfg = configs.Go2OscPushGlideCotMuCfg()
+    runner_cfg = configs.Go2OscPushGlideCotMuRunnerCfg()
+    cfg.seed = runner_cfg.seed = 23
+    cfg.env.num_envs = 3
+    cfg.push_robots.toggle = False
+    cfg.domain_randomization.startup.contact_friction_range = [0.1, 1.0]
+    cfg.init_state.reset_mode = "reset_to_basic"
+    task_registry.convert_frequencies_to_params(cfg, runner_cfg)
+    backend = MuJocoCPUBackend()
+    try:
+        env = Go2OscPushGlide(cfg, "cpu", True, backend)
+        env.commands[:] = torch.tensor(
+            [[1.0, 0.0, 0.0], [0.25, 0.0, 0.0], [0.0, 0.0, 0.0]]
+        )
+        action = torch.zeros(3, 12)
+        action[:, 1::3] = 1.5
+        env.set_states(runner_cfg.actor.actions, action)
+        env.step()
+        observation = env.get_states(runner_cfg.actor.obs)
+        assert observation.shape == (3, 62)
+        applied = backend.contact_friction
+        assert applied.unique().numel() == 3
+        torch.testing.assert_close(observation[:, -1], applied)
+        velocity = env.dof_vel.index_select(1, env.actuated_dof_indices)
+        power = (env.torques * velocity).abs().sum(dim=1)
+        assert (power > 0).all()
+        weight = backend.link_mass.sum(dim=1) * 9.81
+        expected = -power / (weight * torch.tensor([1.0, 0.5, 0.5]))
+        torch.testing.assert_close(env._reward_cost_of_transport(), expected)
+        assert runner_cfg.critic.reward.weights.cost_of_transport == 1.0
     finally:
         backend.close()
 

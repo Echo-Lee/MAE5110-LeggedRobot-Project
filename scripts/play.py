@@ -21,12 +21,14 @@ The Go2 renders with its real meshes when they are installed
 
 import argparse
 import copy
+import math
 import os
 import random
 import sys
 
 import torch
 
+from gym.envs.base.domain_randomization import set_domain_randomization_range
 from gym.utils.helpers import set_seed
 from gym.utils.task_registry import task_registry
 
@@ -83,6 +85,11 @@ def get_play_args(argv=None):
         "alongside keyboard teleop)",
     )
     parser.add_argument(
+        "--basic-visuals",
+        action="store_true",
+        help="Use basic MuJoCo geometry instead of optional detailed visual assets.",
+    )
+    parser.add_argument(
         "--follow_camera",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -94,8 +101,7 @@ def get_play_args(argv=None):
         "--friction",
         type=float,
         default=None,
-        help="fix every environment's contact friction to this coefficient, "
-        "replacing the task's friction randomization",
+        help="Fix ground and robot sliding friction, overriding randomization.",
     )
     parser.add_argument(
         "--command",
@@ -135,13 +141,17 @@ def get_play_args(argv=None):
         "Use --no-keyboard to disable.",
     )
     args = parser.parse_args(argv)
+    if args.basic_visuals and args.backend != "mujoco":
+        parser.error("--basic-visuals requires --backend mujoco")
+    if args.friction is not None and (
+        not math.isfinite(args.friction) or args.friction < 0
+    ):
+        parser.error("--friction must be finite and non-negative")
     if args.num_envs is None:
         args.num_envs = 1 if args.video else 32
     if args.video:
         # A recording renders off-screen; no interactive viewer is opened.
         args.headless = True
-    if args.friction is not None and args.friction <= 0:
-        parser.error("--friction must be positive")
     if args.video_seconds <= 0:
         parser.error("--video_seconds must be positive")
     return args
@@ -192,6 +202,8 @@ def play_cfgs(args):
     env_cfg.init_state.reset_mode = "reset_to_basic"
     if hasattr(env_cfg, "viewer"):
         env_cfg.viewer.show_ui = args.viewer_ui
+    if args.basic_visuals:
+        env_cfg.asset.mujoco_visual_model = None
     if args.video:
         # Load visuals (real Go2 meshes, ground texture, skybox, lights) for
         # off-screen rendering too. Display-only: physics, including link-mass
@@ -202,7 +214,11 @@ def play_cfgs(args):
         # starts on exactly this coefficient and keeps it, and the backend
         # still allocates per-environment friction.
         randomization = env_cfg.domain_randomization
-        randomization.startup.contact_friction_range = [args.friction, args.friction]
+        env_cfg.terrain.static_friction = args.friction
+        env_cfg.terrain.dynamic_friction = args.friction
+        set_domain_randomization_range(
+            env_cfg, "contact_friction_range", [args.friction, args.friction]
+        )
         # Optional refinements of the friction axis, where a task has them.
         for name in ("contact_friction_bins", "contact_friction_bin_weights"):
             if hasattr(randomization.startup, name):

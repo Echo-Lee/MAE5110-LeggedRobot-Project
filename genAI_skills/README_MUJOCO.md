@@ -190,6 +190,11 @@ allows deployment-only machines to install without the local VSim wheel.
 
 ### Train
 
+`go2osc_push_glide_robust` trains Go2 with changing per-foot friction, sensing
+errors, delayed actuation, and curved stop targets. See the
+[robust training and playback guide](../README.md#robust-locomotion-and-curved-stop-targets)
+for GPU training and CPU playback commands.
+
 ```bash
 # Pendulum (fixed-base, 1 DOF) — with GUI viewer
 uv run --frozen scripts/train.py --task pendulum --device cpu --num_envs 256

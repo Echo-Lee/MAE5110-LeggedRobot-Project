@@ -82,12 +82,38 @@ def set_domain_randomization_range(cfg, name: str, values) -> None:
     cfg.domain_randomization.episode.scale_ranges = ranges
 
 
+def _clear_task_variation(cfg, keep_ground_changes: bool) -> None:
+    """Switch off task-level sensing errors, actuation delay and ground changes.
+
+    Tasks that model these keep them in ``cfg.sensing``,
+    ``cfg.friction_changes`` and ``cfg.control.actuation_delay_range``.
+    Ranges become ``None``; rates, noise levels and time constants become zero.
+    """
+    control = getattr(cfg, "control", None)
+    if getattr(control, "actuation_delay_range", None) is not None:
+        control.actuation_delay_range = None
+    sections = ["sensing"] if keep_ground_changes else ["sensing", "friction_changes"]
+    for section_name in sections:
+        section = getattr(cfg, section_name, None)
+        if section is None:
+            continue
+        for name in dir(section):
+            if name.startswith("_"):
+                continue
+            value = getattr(section, name)
+            if isinstance(value, (list, tuple)):
+                setattr(section, name, None)
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                setattr(section, name, 0.0)
+
+
 def apply_domain_randomization_override(cfg, mode: str) -> None:
     """Select a deliberate subset of the configured randomization axes."""
     if mode == "config":
         return
     if mode not in DOMAIN_RANDOMIZATION_MODES:
         raise ValueError(f"unknown domain-randomization mode {mode!r}")
+    _clear_task_variation(cfg, keep_ground_changes=mode == "friction-only")
 
     keep_startup = {
         "off": set(),

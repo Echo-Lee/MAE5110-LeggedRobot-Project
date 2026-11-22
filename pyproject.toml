@@ -55,8 +55,11 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["gym*", "learning*", "go2_deploy*"]
+include = ["gym*", "learning*", "go2_deploy*", "resources.robots.go2.urdf"]
 namespaces = true
+
+[tool.setuptools.package-data]
+"resources.robots.go2.urdf" = ["*.urdf"]
 
 [tool.pytest.ini_options]
 # pythonpath: the console-script `pytest` does NOT put the CWD on sys.path

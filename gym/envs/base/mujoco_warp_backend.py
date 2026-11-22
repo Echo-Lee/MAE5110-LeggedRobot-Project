@@ -165,6 +165,28 @@ class MuJocoWarpBackend(MuJocoBackendBase):
         if self._pair_friction_t is not None:
             self._pair_friction_t[ids, :, 0:2] = values[:, None, None]
 
+    def set_contact_friction_by_body(
+        self,
+        env_ids: torch.Tensor,
+        body_indices: torch.Tensor,
+        coefficients: torch.Tensor,
+    ) -> None:
+        ids, bodies, values = self._prepare_body_friction_update(
+            env_ids, body_indices, coefficients
+        )
+        if ids.numel() == 0:
+            return
+        if not self._randomize_contact_friction:
+            raise RuntimeError(
+                "contact-friction randomization was not enabled before setup"
+            )
+        geoms, columns = self._geoms_by_body(bodies)
+        geoms = torch.as_tensor(geoms, dtype=torch.long, device=self.device)
+        columns = torch.as_tensor(columns, dtype=torch.long, device=self.device)
+        self._contact_friction_t[ids] = values.mean(dim=1)
+        self._geom_friction_t[ids, :, 0] = values.min(dim=1, keepdim=True).values
+        self._geom_friction_t[ids[:, None], geoms[None, :], 0] = values[:, columns]
+
     def set_link_mass_scale(
         self,
         env_ids: torch.Tensor,

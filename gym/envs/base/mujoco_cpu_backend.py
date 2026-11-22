@@ -56,6 +56,8 @@ class MuJocoCPUBackend(MuJocoBackendBase):
         self._randomize_contact_friction = False
         self._randomize_link_mass = False
         self._models: list[mujoco.MjModel] | None = None
+        # [num_envs, ngeom] sliding friction once any body has its own value.
+        self._geom_friction_np: np.ndarray | None = None
 
     # ── State tensors ──────────────────────────────────────────────────────────
 
@@ -100,9 +102,44 @@ class MuJocoCPUBackend(MuJocoBackendBase):
                 "contact-friction randomization was not enabled before setup"
             )
         self._contact_friction_t[ids] = values
+        if self._geom_friction_np is not None:
+            self._geom_friction_np[ids.cpu().numpy()] = values.cpu().numpy()[:, None]
         if self._models is not None:
             for env_id, value in zip(ids.tolist(), values.tolist()):
                 self._set_model_contact_friction(self._models[env_id], value)
+
+    def set_contact_friction_by_body(
+        self,
+        env_ids: torch.Tensor,
+        body_indices: torch.Tensor,
+        coefficients: torch.Tensor,
+    ) -> None:
+        ids, bodies, values = self._prepare_body_friction_update(
+            env_ids, body_indices, coefficients
+        )
+        if ids.numel() == 0:
+            return
+        if not self._randomize_contact_friction:
+            raise RuntimeError(
+                "contact-friction randomization was not enabled before setup"
+            )
+        geoms, columns = self._geoms_by_body(bodies)
+        if self._geom_friction_np is None:
+            self._geom_friction_np = np.repeat(
+                self._contact_friction_t.cpu().numpy().astype(np.float64)[:, None],
+                self._mjm.ngeom,
+                axis=1,
+            )
+        rows = ids.cpu().numpy()
+        table = values.cpu().numpy().astype(np.float64)
+        self._geom_friction_np[rows] = table.min(axis=1, keepdims=True)
+        self._geom_friction_np[rows[:, None], geoms[None, :]] = table[:, columns]
+        self._contact_friction_t[ids] = values.mean(dim=1)
+        if self._models is not None:
+            for env_id in rows.tolist():
+                self._models[env_id].geom_friction[:, 0] = self._geom_friction_np[
+                    env_id
+                ]
 
     def set_link_mass_scale(
         self,
@@ -140,6 +177,9 @@ class MuJocoCPUBackend(MuJocoBackendBase):
     def _activate_domain(self, env_id: int) -> None:
         """Activate one environment's parameters on the shared CPU model."""
         if not self._randomize_contact_friction or self._models is not None:
+            return
+        if self._geom_friction_np is not None:
+            self._mjm.geom_friction[:, 0] = self._geom_friction_np[env_id]
             return
         self._set_model_contact_friction(
             self._mjm, float(self._contact_friction_t[env_id])

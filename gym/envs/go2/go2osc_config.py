@@ -361,6 +361,10 @@ class Go2OscPushGlideCfg(Go2OscORC111GRFDirectionalCfg):
         yaw_tracking_tolerance = 0.25
         # Most that tilt_rate charges per step [rad^2/s^2]; 4 is 2 rad/s.
         tilt_rate_cap = 4.0
+        # Slowest commanded speed [m/s] that cost_of_transport divides by.
+        cost_of_transport_min_speed = 0.5
+        # Most that cost_of_transport charges per step; walking is near 0.6.
+        cost_of_transport_cap = 5.0
 
 
 class Go2OscPushGlideRunnerCfg(Go2OscORC111GRFDirectionalRunnerCfg):
@@ -383,6 +387,8 @@ class Go2OscPushGlideRunnerCfg(Go2OscORC111GRFDirectionalRunnerCfg):
                 lin_vel_z = 2.0
                 # Squared roll and pitch rate: damps the rocking of the trot.
                 tilt_rate = 1.0
+                # Joint power per weight and commanded speed; the Cot tasks use it.
+                cost_of_transport = 0.0
 
     class runner(Go2OscORC111GRFDirectionalRunnerCfg.runner):
         experiment_name = "go2osc_push_glide"
@@ -406,3 +412,225 @@ class Go2OscPushGlideF050Cfg(Go2OscPushGlideCfg):
 class Go2OscPushGlideF050RunnerCfg(Go2OscPushGlideRunnerCfg):
     class runner(Go2OscPushGlideRunnerCfg.runner):
         experiment_name = "go2osc_push_glide_f050"
+
+
+class Go2OscPushGlideCotCfg(Go2OscPushGlideCfg):
+    class reward_settings(Go2OscPushGlideCfg.reward_settings):
+        # Hold the commanded speed [m/s], so that energy is saved by changing
+        # the gait and not by walking slower.
+        velocity_tracking_tolerance = 0.5
+
+
+class Go2OscPushGlideCotRunnerCfg(Go2OscPushGlideRunnerCfg):
+    class critic(Go2OscPushGlideRunnerCfg.critic):
+        class reward(Go2OscPushGlideRunnerCfg.critic.reward):
+            class weights(Go2OscPushGlideRunnerCfg.critic.reward.weights):
+                cost_of_transport = 1.0
+
+    class runner(Go2OscPushGlideRunnerCfg.runner):
+        experiment_name = "go2osc_push_glide_cot"
+
+
+class Go2OscPushGlideCotMuCfg(Go2OscPushGlideCotCfg):
+    pass
+
+
+class Go2OscPushGlideCotMuRunnerCfg(Go2OscPushGlideCotRunnerCfg):
+    class actor(Go2OscPushGlideCotRunnerCfg.actor):
+        # The true friction coefficient: the best case for any estimator.
+        obs = Go2OscPushGlideCotRunnerCfg.actor.obs + ["contact_friction_obs"]
+
+    class runner(Go2OscPushGlideCotRunnerCfg.runner):
+        experiment_name = "go2osc_push_glide_cot_mu"
+
+
+class Go2OscPushGlideRobustCfg(Go2OscPushGlideCotCfg):
+    """Energy-priced walking in both directions, with what hardware adds.
+
+    Sensor errors, a delay before targets reach the motors, varied mass and
+    motor gains, harder pushes, and ground friction that changes during an
+    episode and differs between feet. Every range below is an assumption to
+    replace with measurements from the robot.
+    """
+
+    class env(Go2OscPushGlideCotCfg.env):
+        # Two full commands per episode: the second starts from speed the
+        # robot built itself, on whatever ground it is on by then.
+        episode_length_s = 6.0
+
+    class commands(Go2OscPushGlideCotCfg.commands):
+        # Backward as well as forward [m/s]. Fast commands are worth chasing
+        # on low friction because speed tracking is measured against a
+        # friction-limited reference (reward_settings.speed_reference).
+        forward_uniform_range = [-1.0, 2.0]
+        # Sliding stops. A robot moving faster than sliding_stop_min_speed
+        # [m/s] when it gets a new command (episode start or command change)
+        # is, with this probability, told to stop instead: zero speed and a
+        # turn rate drawn over the whole range.
+        sliding_stop_probability = 0.5
+        sliding_stop_min_speed = 0.5
+        # The stop is held this long [s]; then a new command is drawn.
+        sliding_stop_duration = 1.5
+        # Friction budget for slowing down, as a fraction of friction times
+        # gravity: the speed target falls at this rate and is tracked both
+        # ways. At 0.9 a stop is a real slide, about 1.1 times the shortest
+        # possible one. A carved turn shares the budget (reward_settings).
+        # A range [low, high] is drawn per command.
+        braking_range = [0.9, 0.9]
+
+        class ranges(Go2OscPushGlideCotCfg.commands.ranges):
+            lin_vel_x = [-1.0, 2.0]
+
+    class osc(Go2OscPushGlideCotCfg.osc):
+        # The clocks follow a forward speed target v_t that approaches the
+        # command at the rates of the speed reference, from the friction
+        # estimate (at least clock_speed_min_friction). The frequency is
+        # 1.5 + |v_t| Hz, and the standing branch waits until |v_t| <= 0.2.
+        clock_follows_speed_target = True
+        clock_speed_min_friction = 0.02
+
+    class init_state(Go2OscPushGlideCotCfg.init_state):
+        # Episodes also begin moving backward.
+        root_vel_range = [
+            [-1.5, 2.5],  # x
+            [0.0, 0.0],  # y
+            [-0.05, 0.05],  # z
+            [0.0, 0.0],  # roll
+            [0.0, 0.0],  # pitch
+            [0.0, 0.0],  # yaw
+        ]
+
+    class control(Go2OscPushGlideCotCfg.control):
+        # Time from a joint target leaving the policy to the motors acting on
+        # it [s]; one value per robot and episode.
+        actuation_delay_range = [0.0, 0.02]
+
+    class push_robots(Go2OscPushGlideCotCfg.push_robots):
+        interval_s = 5
+        max_push_vel_xy = 0.5
+
+    class domain_randomization(Go2OscPushGlideCotCfg.domain_randomization):
+        class startup(Go2OscPushGlideCotCfg.domain_randomization.startup):
+            link_mass_scale_range = [0.9, 1.1]
+            contact_friction_range = [0.05, 1.0]
+
+        class episode(Go2OscPushGlideCotCfg.domain_randomization.episode):
+            scale_ranges = {
+                "p_gains": [0.8, 1.2],
+                "d_gains": [0.8, 1.2],
+            }
+
+    class fast_slides:
+        # Share of fresh episodes that start sliding along the heading at a
+        # speed from speed_range [m/s] on ground of friction from
+        # friction_range, told to stop with a turn rate (a sliding stop).
+        probability = 0.2
+        friction_range = [0.05, 0.3]
+        speed_range = [1.5, 2.5]
+
+    class falls:
+        # A robot tilted further than this [deg] has fallen: the episode
+        # ends as when the base touches the ground.
+        max_tilt = 60.0
+
+    class friction_changes:
+        # Mean number of redraws of the ground friction per second.
+        rate = 0.2
+        # Share of draws in which each foot gets its own friction.
+        split_probability = 0.3
+
+    class sensing:
+        # Friction estimate the actor receives: the mean friction under the
+        # feet through a first-order lag [s], times a gain fixed for the
+        # episode, plus noise at every control step.
+        friction_estimate_gain_range = [0.7, 1.4]
+        friction_estimate_noise_std = 0.05
+        friction_estimate_time_constant = 0.5
+        # Normal load the clocks receive: gain per foot and episode, noise at
+        # every physics step [body weights].
+        foot_load_gain_range = [0.8, 1.2]
+        foot_load_noise_std = 0.05
+        # Gain per foot and episode on the traction ratios the actor observes.
+        foot_traction_gain_range = [0.7, 1.3]
+        # First-order lag on both foot-force signals [s].
+        foot_force_time_constant = 0.02
+
+    class scaling(Go2OscPushGlideCotCfg.scaling):
+        friction_estimate_obs = 1.0
+        foot_friction_obs = 1.0
+        clock_speed_obs = 3.0
+
+    class reward_settings(Go2OscPushGlideCotCfg.reward_settings):
+        # Charge energy per metre actually made along the command.
+        cost_of_transport_speed = "travelled"
+        # Measure speed tracking against a reference that moves toward the
+        # command at these fractions of friction times gravity when speeding
+        # up and when braking, at most the caps [m/s^2].
+        speed_reference = True
+        speed_reference_gain = 0.5
+        speed_reference_brake = 0.9
+        speed_reference_max_gain = 2.0
+        speed_reference_max_brake = 5.0
+        # Turning faster than commanded by more than this [rad/s] is
+        # penalised (reward term yaw_overshoot).
+        yaw_overshoot_tolerance = 0.25
+        # Told zero planar speed and a turn rate, the robot carves: its path
+        # turns at the commanded rate, capped by friction, and turning and
+        # braking together use the braking budget (speed times turn rate
+        # sideways, the rest to slow down). At least this share of the
+        # budget always brakes.
+        speed_reference_carve = True
+        speed_reference_carve_min_brake = 0.5
+        # Reward term standing, while the clocks stand: planar speed squared,
+        # plus this weight times yaw rate squared, plus this weight per foot
+        # carrying less than standing_lift_load body weights.
+        standing_turn_weight = 0.5
+        standing_lift_weight = 0.25
+        standing_lift_load = 0.05
+
+
+class Go2OscPushGlideRobustRunnerCfg(Go2OscPushGlideCotRunnerCfg):
+    class actor(Go2OscPushGlideCotRunnerCfg.actor):
+        # A friction estimate with errors, and the body velocity.
+        obs = Go2OscPushGlideCotRunnerCfg.actor.obs + [
+            "friction_estimate_obs",
+            "base_lin_vel",
+            "clock_speed_obs",
+        ]
+
+        class noise(Go2OscPushGlideCotRunnerCfg.actor.noise):
+            # Half-widths of uniform noise, in the units of each signal.
+            base_ang_vel = 0.2  # [rad/s]
+            projected_gravity = 0.05
+            dof_pos_obs = 0.01  # [rad]
+            dof_vel = 0.5  # [rad/s]
+            foot_traction_obs = 0.1
+            base_lin_vel = 0.1  # [m/s]
+
+    class critic(Go2OscPushGlideCotRunnerCfg.critic):
+        # The true friction under each foot.
+        obs = Go2OscPushGlideCotRunnerCfg.critic.obs + [
+            "foot_friction_obs",
+            "clock_speed_obs",
+        ]
+
+        class reward(Go2OscPushGlideCotRunnerCfg.critic.reward):
+            class weights(Go2OscPushGlideCotRunnerCfg.critic.reward.weights):
+                cost_of_transport = 3.0
+                # As much as speed tracking, so that a turn commanded during a
+                # sliding stop is worth following.
+                tracking_ang_vel = 4.0
+                # Spinning out: 3 rad/s against a 0.5 command costs 5 per second.
+                yaw_overshoot = 1.0
+                # Standing still while the clocks stand (see reward_settings).
+                standing = 2.0
+
+            class termination_weight(
+                Go2OscPushGlideCotRunnerCfg.critic.reward.termination_weight
+            ):
+                # Applied once per fall, without time integration, on top of
+                # the reward the fallen robot no longer collects.
+                termination = 5.0
+
+    class runner(Go2OscPushGlideCotRunnerCfg.runner):
+        experiment_name = "go2osc_push_glide_robust"

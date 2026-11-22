@@ -6,7 +6,9 @@ import xml.etree.ElementTree as ET
 import torch
 
 from gym import GYM_ROOT_DIR
+from gym.envs.base.domain_randomization import contact_friction_range
 from gym.envs.go2.go2 import Go2
+from gym.envs.go2.go2osc_speed_target import Go2OscSpeedTargetMixin
 from gym.utils.sampling import masked_update
 from gym.utils.torch_quat import quat_apply
 
@@ -142,13 +144,21 @@ class Go2Osc(Go2):
         self.grf.copy_(self._compute_grf())
         self.compute_osc_slope(reset_mask)
 
+    def _clock_forward_command(self):
+        """Forward speed [m/s] the clock schedule of Equation (5) follows.
+
+        The commanded forward speed; variants may substitute a target that
+        approaches the command gradually.
+        """
+        return self.commands[:, :1]
+
     def _slow_command_mask(self):
         """Environments on the standing branch of Equation (5)."""
-        return self.commands[:, :1].abs() <= self.cfg.osc.stop_threshold
+        return self._clock_forward_command().abs() <= self.cfg.osc.stop_threshold
 
     def compute_osc_slope(self, update_mask=None):
         """Equation (5), with optional explicitly configured parameter noise."""
-        speed = self.commands[:, :1].abs()
+        speed = self._clock_forward_command().abs()
         slow = self._slow_command_mask()
         omega = torch.where(
             slow,
@@ -746,7 +756,7 @@ class Go2OscDirectional(Go2Osc):
         # Read live forces: the cached actor observations refresh after phase
         # integration and must not introduce a one-substep feedback delay.
         _, angle = self._compute_directional_force_signals()
-        moving = self.commands[:, :1].abs() > self.cfg.osc.stop_threshold
+        moving = self._clock_forward_command().abs() > self.cfg.osc.stop_threshold
         offset = self.cfg.osc.directional_gain * angle.sin() * moving
         if getattr(self.cfg.osc, "directional_stance_gate", False):
             offset = offset * (-self.oscillators.sin()).clamp(min=0.0)
@@ -761,7 +771,7 @@ class Go2OscDirectional(Go2Osc):
             == "angle_release"
         ):
             _, angle = self._compute_directional_force_signals()
-            moving = self.commands[:, :1].abs() > self.cfg.osc.stop_threshold
+            moving = self._clock_forward_command().abs() > self.cfg.osc.stop_threshold
             release = (1 + self.oscillators.cos()) / 2
             activation = angle.sin() * release
             # Cycles/s; common process noise and 2*pi conversion remain outside.
@@ -777,7 +787,7 @@ class Go2OscDirectional(Go2Osc):
             == "fractional_stance"
         ):
             _, angle = self._compute_directional_force_signals()
-            moving = self.commands[:, :1].abs() > self.cfg.osc.stop_threshold
+            moving = self._clock_forward_command().abs() > self.cfg.osc.stop_threshold
             stance = (-self.oscillators.sin()).clamp(min=0.0)
             activation = self.cfg.osc.directional_gain * angle.sin() * moving * stance
             # This mode always gates in stance; the legacy offset-mode gate is
@@ -1313,7 +1323,7 @@ class Go2OscDirectional(Go2Osc):
         masked_update(self._previous_normal_load, normal, reset_mask)
 
 
-class Go2OscPushGlide(Go2OscDirectional):
+class Go2OscPushGlide(Go2OscSpeedTargetMixin, Go2OscDirectional):
     """Read each phase as push versus glide instead of contact versus flight.
 
     While the forward command exceeds the stop threshold, oscillator feedback
@@ -1325,6 +1335,15 @@ class Go2OscPushGlide(Go2OscDirectional):
     the standing fixed point of Equation (4) in mid-stance. With the steering
     thresholds set, a sideways or turning command also selects the moving
     clocks, so the robot can step in place.
+
+    Optional configuration adds what hardware adds: errors on the foot-force
+    and friction signals (``cfg.sensing``), a delay before joint targets reach
+    the motors (``cfg.control.actuation_delay_range``) and ground friction
+    that changes during an episode and differs between feet
+    (``cfg.friction_changes``). Each is off unless configured.
+
+    ``cfg.commands.sliding_stop_probability`` adds stop commands for robots
+    that are moving, so training sees more slides to a stop.
     """
 
     def __init__(self, cfg, device, headless, backend):
@@ -1373,6 +1392,16 @@ class Go2OscPushGlide(Go2OscDirectional):
             or limit <= 0.0
         ):
             raise ValueError("action_limit must be None or finite and positive")
+        for name in ("cost_of_transport_min_speed", "cost_of_transport_cap"):
+            value = getattr(cfg.reward_settings, name, 1.0)
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or value <= 0.0
+            ):
+                raise ValueError(f"{name} must be finite and positive")
+        Go2OscPushGlide._validate_variation_cfg(cfg)
         # Both steering thresholds, or neither for the forward-only rule.
         steering = [
             getattr(cfg.osc, name, None)
@@ -1394,11 +1423,16 @@ class Go2OscPushGlide(Go2OscDirectional):
         super()._init_buffers()
         self.foot_traction_obs = torch.zeros(self.num_envs, 8, device=self.device)
         self.contact_friction_obs = torch.zeros(self.num_envs, 1, device=self.device)
+        self._init_variation_buffers()
         self._refresh_traction_observations()
         self._refresh_friction_observation()
+        self._refresh_friction_estimate(
+            torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        )
 
     def _pre_decimation_step(self):
         self._limit_joint_targets()
+        self._record_joint_targets()
         super()._pre_decimation_step()
 
     def _limit_joint_targets(self):
@@ -1434,7 +1468,7 @@ class Go2OscPushGlide(Go2OscDirectional):
 
     def _translating(self):
         """Commands with a travel direction for the push gate to act along."""
-        forward = self.commands[:, :1].abs() > self.cfg.osc.stop_threshold
+        forward = self._clock_forward_command().abs() > self.cfg.osc.stop_threshold
         sideways = getattr(self.cfg.osc, "sideways_stop_threshold", None)
         if sideways is None:
             return forward
@@ -1466,7 +1500,8 @@ class Go2OscPushGlide(Go2OscDirectional):
     def _compute_push_gate(self):
         """Near 1 for a foot stroking against commanded travel, near 0 with it."""
         command = torch.zeros(self.num_envs, 3, device=self.device)
-        command[:, :2] = self.commands[:, :2]
+        command[:, :1] = self._clock_forward_command()
+        command[:, 1] = self.commands[:, 1]
         heading = command / command.norm(dim=1, keepdim=True).clamp(min=1.0e-6)
         direction = quat_apply(self.base_quat, heading)
         relative = self._foot_velocity_relative_to_base()
@@ -1482,9 +1517,18 @@ class Go2OscPushGlide(Go2OscDirectional):
         return torch.where(self._translating(), gated, load)
 
     def _compute_push_signal(self):
-        """Gated normal load when moving; plain normal load otherwise."""
+        """Gated normal load when moving; plain normal load otherwise.
+
+        With foot-load errors configured, the clocks receive the sensed load.
+        """
+        if self._foot_load_is_sensed():
+            return self._gated(self._sensed_foot_load)
         normal, _ = self._foot_loads()
         return self._gated(normal)
+
+    def _step_oscillators(self, dt):
+        self._refresh_sensed_foot_load(dt)
+        super()._step_oscillators(dt)
 
     def _compute_oscillator_drift(self):
         """Equation (4) with the push signal in place of force magnitude."""
@@ -1519,6 +1563,35 @@ class Go2OscPushGlide(Go2OscDirectional):
         normal, tangent = self._foot_loads()
         cost = torch.where(self._moving(), tangent, normal)
         return -(phase * cost).sum(dim=1)
+
+    def _reward_cost_of_transport(self):
+        """Negative joint power per unit weight and unit speed.
+
+        With ``cost_of_transport_speed = "command"`` the speed is the commanded
+        one: the mechanical cost of transport when the robot moves as told, so
+        every speed is charged per metre and not per second. With
+        ``"travelled"`` it is the speed the body actually makes along the
+        commanded direction, counted up to the commanded speed, so walking
+        slower than told no longer lowers the charge. Speeds below the floor
+        are charged as if at the floor, which keeps standing and slow walking
+        from being priced out. The cap bounds what a fallen, thrashing robot
+        can cost.
+        """
+        settings = self.cfg.reward_settings
+        velocity = self.dof_vel.index_select(1, self.actuated_dof_indices)
+        power = (self.torques * velocity).abs().sum(dim=1)
+        weight = self._backend.link_mass.sum(dim=1) * 9.81
+        floor = getattr(settings, "cost_of_transport_min_speed", 0.5)
+        command = self.commands[:, :2]
+        commanded = command.norm(dim=1)
+        if getattr(settings, "cost_of_transport_speed", "command") == "travelled":
+            direction = command / commanded.clamp(min=1.0e-6).unsqueeze(1)
+            along = (self.base_lin_vel[:, :2] * direction).sum(dim=1)
+            speed = torch.minimum(along, commanded).clamp(min=floor)
+        else:
+            speed = commanded.clamp(min=floor)
+        cap = getattr(settings, "cost_of_transport_cap", 5.0)
+        return -(power / (weight * speed)).clamp(max=cap)
 
     def _reward_tilt_rate(self):
         """Negative squared roll and pitch rate of the base [rad^2/s^2], capped.
@@ -1557,6 +1630,7 @@ class Go2OscPushGlide(Go2OscDirectional):
         observation = torch.where(
             loaded.unsqueeze(-1), ratio, torch.zeros_like(ratio)
         ).flatten(start_dim=1)
+        observation = self._sense_traction(observation, reset_mask)
         if reset_mask is None:
             self.foot_traction_obs.copy_(observation)
         else:
@@ -1569,13 +1643,517 @@ class Go2OscPushGlide(Go2OscDirectional):
             self.contact_friction_obs.copy_(friction)
         else:
             masked_update(self.contact_friction_obs, friction, reset_mask)
+        # Without per-foot draws every foot meets the environment's value.
+        per_foot = getattr(self, "foot_friction_obs", None)
+        if per_foot is not None and not self._ground_friction_varies():
+            if reset_mask is None:
+                per_foot.copy_(friction.expand_as(per_foot))
+            else:
+                masked_update(per_foot, friction.expand_as(per_foot), reset_mask)
 
     def _post_physics_step(self):
         super()._post_physics_step()
         self._refresh_traction_observations()
         self._refresh_friction_observation()
 
+    def _post_compute_torques(self):
+        super()._post_compute_torques()
+        self._physics_step_in_control_step += 1
+
+    def _post_decimation_step(self):
+        self._count_down_sliding_stops()
+        super()._post_decimation_step()
+        self._change_ground_friction()
+        self._refresh_friction_observation()
+        self._refresh_friction_estimate()
+        self._advance_speed_reference()
+        self._advance_clock_speed()
+
+    def _resample_commands(self, command_mask):
+        ended = getattr(self, "_sliding_stop_ended", None)
+        if ended is not None:
+            # A stop that has run its time is followed by a new command.
+            command_mask = command_mask | ended
+            self._sliding_stop_ended = None
+        super()._resample_commands(command_mask)
+        self._command_sliding_stops(command_mask)
+        self._draw_braking(command_mask)
+
     def _reset_idx(self, reset_mask):
         super()._reset_idx(reset_mask)
+        self._resample_variation(reset_mask)
+        self._start_fast_slides(reset_mask)
+        self._refresh_sensed_foot_load(reset_mask=reset_mask)
         self._refresh_traction_observations(reset_mask)
         self._refresh_friction_observation(reset_mask)
+        self._refresh_friction_estimate(reset_mask)
+        self._advance_speed_reference(reset_mask)
+        self._advance_clock_speed(reset_mask)
+
+    # ── Sensing errors, actuation delay and ground variation ───────────────
+
+    def _sensing(self, name, default=None):
+        return getattr(getattr(self.cfg, "sensing", None), name, default)
+
+    @staticmethod
+    def _validate_variation_cfg(cfg):
+        """Reject malformed optional sensing, delay and ground settings."""
+
+        def number(value):
+            return (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+            )
+
+        def pair(value):
+            return (
+                isinstance(value, (list, tuple))
+                and len(value) == 2
+                and all(number(item) for item in value)
+            )
+
+        mode = getattr(cfg.reward_settings, "cost_of_transport_speed", "command")
+        if mode not in ("command", "travelled"):
+            raise ValueError("cost_of_transport_speed must be 'command' or 'travelled'")
+        delay = getattr(cfg.control, "actuation_delay_range", None)
+        if delay is not None and not (pair(delay) and 0.0 <= delay[0] <= delay[1]):
+            raise ValueError(
+                "actuation_delay_range must be None or [low, high] seconds with "
+                "0 <= low <= high"
+            )
+        sensing = getattr(cfg, "sensing", None)
+        for name in (
+            "friction_estimate_gain_range",
+            "foot_load_gain_range",
+            "foot_traction_gain_range",
+        ):
+            value = getattr(sensing, name, None)
+            if value is not None and not (
+                pair(value) and 0.0 < value[0] <= 1.0 <= value[1]
+            ):
+                raise ValueError(
+                    f"{name} must be None or [low, high] with 0 < low <= 1 <= high"
+                )
+        for name in (
+            "friction_estimate_noise_std",
+            "friction_estimate_time_constant",
+            "foot_load_noise_std",
+            "foot_force_time_constant",
+        ):
+            value = getattr(sensing, name, 0.0)
+            if not number(value) or value < 0.0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+        changes = getattr(cfg, "friction_changes", None)
+        rate = getattr(changes, "rate", 0.0)
+        if not number(rate) or rate < 0.0:
+            raise ValueError("friction_changes rate must be finite and nonnegative")
+        split = getattr(changes, "split_probability", 0.0)
+        if not number(split) or not 0.0 <= split <= 1.0:
+            raise ValueError("friction_changes split_probability must lie in [0, 1]")
+        settings = cfg.reward_settings
+        if getattr(settings, "speed_reference", False):
+            for name in (
+                "speed_reference_gain",
+                "speed_reference_brake",
+                "speed_reference_max_gain",
+                "speed_reference_max_brake",
+                "velocity_tracking_tolerance",
+            ):
+                value = getattr(settings, name, None)
+                if not number(value) or value <= 0.0:
+                    raise ValueError(f"{name} must be finite and positive")
+        braking = getattr(cfg.commands, "braking_range", None)
+        if braking is not None and not (
+            pair(braking) and 0.0 < braking[0] <= braking[1]
+        ):
+            raise ValueError(
+                "braking_range must be None or [low, high] fractions of "
+                "friction times gravity with 0 < low <= high"
+            )
+        if getattr(cfg.osc, "clock_follows_speed_target", False):
+            if not getattr(settings, "speed_reference", False):
+                raise ValueError("clock_follows_speed_target needs speed_reference")
+            floor = getattr(cfg.osc, "clock_speed_min_friction", None)
+            if not number(floor) or floor <= 0.0:
+                raise ValueError("clock_speed_min_friction must be finite and positive")
+        if getattr(settings, "speed_reference_carve", False):
+            if not getattr(settings, "speed_reference", False):
+                raise ValueError("speed_reference_carve needs speed_reference")
+            floor = getattr(settings, "speed_reference_carve_min_brake", None)
+            if not number(floor) or not 0.0 <= floor <= 1.0:
+                raise ValueError("speed_reference_carve_min_brake must lie in [0, 1]")
+        for name in (
+            "standing_turn_weight",
+            "standing_lift_weight",
+            "standing_lift_load",
+        ):
+            value = getattr(settings, name, 0.0)
+            if not number(value) or value < 0.0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+        probability = getattr(cfg.commands, "sliding_stop_probability", 0.0)
+        if not number(probability) or not 0.0 <= probability <= 1.0:
+            raise ValueError("sliding_stop_probability must lie in [0, 1]")
+        if probability > 0.0:
+            speed = getattr(cfg.commands, "sliding_stop_min_speed", None)
+            if not number(speed) or speed < 0.0:
+                raise ValueError(
+                    "sliding_stop_min_speed must be finite and nonnegative"
+                )
+            duration = getattr(cfg.commands, "sliding_stop_duration", None)
+            if not number(duration) or duration <= 0.0:
+                raise ValueError("sliding_stop_duration must be finite and positive")
+        slides = getattr(cfg, "fast_slides", None)
+        slide_probability = getattr(slides, "probability", 0.0)
+        if not number(slide_probability) or not 0.0 <= slide_probability <= 1.0:
+            raise ValueError("fast_slides probability must lie in [0, 1]")
+        if slide_probability > 0.0:
+            friction = getattr(slides, "friction_range", None)
+            if not (pair(friction) and 0.0 < friction[0] <= friction[1]):
+                raise ValueError(
+                    "fast_slides friction_range must be [low, high] with "
+                    "0 < low <= high"
+                )
+            speed = getattr(slides, "speed_range", None)
+            if not (pair(speed) and 0.0 <= speed[0] <= speed[1]):
+                raise ValueError(
+                    "fast_slides speed_range must be [low, high] m/s with "
+                    "0 <= low <= high"
+                )
+        tilt = getattr(getattr(cfg, "falls", None), "max_tilt", None)
+        if tilt is not None and not (number(tilt) and 0.0 < tilt < 180.0):
+            raise ValueError("falls max_tilt must be None or degrees in (0, 180)")
+        overshoot = getattr(settings, "yaw_overshoot_tolerance", 0.0)
+        if not number(overshoot) or overshoot < 0.0:
+            raise ValueError("yaw_overshoot_tolerance must be finite and nonnegative")
+
+    def _init_variation_buffers(self):
+        n, device = self.num_envs, self.device
+        # Dedicated stream: turning an option on leaves other draws unchanged.
+        self._variation_rng = None
+        seed = getattr(self.cfg, "seed", -1)
+        if isinstance(seed, int) and seed >= 0:
+            self._variation_rng = torch.Generator(device=device)
+            self._variation_rng.manual_seed(seed + 7919)
+        self.friction_estimate_obs = torch.zeros(n, 1, device=device)
+        self.foot_friction_obs = self._backend.contact_friction.unsqueeze(1).repeat(
+            1, 4
+        )
+        self._pre_fast_slide_friction = self.foot_friction_obs.clone()
+        self._fast_slide_friction_override = torch.zeros(
+            n, dtype=torch.bool, device=device
+        )
+        self._friction_estimate_gain = torch.ones(n, 1, device=device)
+        self._friction_estimate_filter = self.foot_friction_obs.mean(
+            dim=1, keepdim=True
+        )
+        self._foot_load_gain = torch.ones(n, 4, device=device)
+        self._foot_load_filter = torch.zeros(n, 4, device=device)
+        self._sensed_foot_load = torch.zeros(n, 4, device=device)
+        self._foot_traction_gain = torch.ones(n, 4, device=device)
+        self._traction_filter = torch.zeros(n, 8, device=device)
+        self._physics_step_in_control_step = 0
+        self._env_rows = torch.arange(n, device=device)
+        self._actuation_delay_steps = torch.zeros(n, dtype=torch.long, device=device)
+        self._target_history = None
+        delay = getattr(self.cfg.control, "actuation_delay_range", None)
+        if delay is not None:
+            physics_dt = self.dt / self.cfg.control.decimation
+            longest = round(delay[1] / physics_dt)
+            depth = -(-longest // self.cfg.control.decimation) + 1
+            self._target_history = torch.zeros(
+                n, depth, self.num_actuators, device=device
+            )
+        self._ground_friction_range = contact_friction_range(self.cfg)
+        self._sliding_stop_steps = torch.zeros(n, dtype=torch.long, device=device)
+        self._sliding_stop_ended = None
+        self._speed_reference = torch.zeros(n, 2, device=device)
+        brake = getattr(self.cfg.reward_settings, "speed_reference_brake", 0.9)
+        self._braking_coefficient = torch.full((n,), float(brake), device=device)
+        self._yaw_reference = torch.zeros(n, device=device)
+        self.clock_speed_obs = torch.zeros(n, 1, device=device)
+
+    def _uniform(self, shape, low, high):
+        generator = getattr(self, "_variation_rng", None)
+        sample = torch.rand(shape, generator=generator, device=self.device)
+        return low + (high - low) * sample
+
+    def _normal(self, shape):
+        generator = getattr(self, "_variation_rng", None)
+        return torch.randn(shape, generator=generator, device=self.device)
+
+    def _resample_variation(self, reset_mask):
+        """Draw the per-episode sensor gains, delay and ground of reset robots."""
+        # Gains and delay follow logical episodes; only ground waits for a
+        # fresh physical reset.
+        for name, gain in (
+            ("friction_estimate_gain_range", self._friction_estimate_gain),
+            ("foot_load_gain_range", self._foot_load_gain),
+            ("foot_traction_gain_range", self._foot_traction_gain),
+        ):
+            bounds = self._sensing(name)
+            if bounds is not None:
+                masked_update(gain, self._uniform(gain.shape, *bounds), reset_mask)
+        if self._target_history is not None:
+            low, high = self.cfg.control.actuation_delay_range
+            physics_dt = self.dt / self.cfg.control.decimation
+            steps = (self._uniform((self.num_envs,), low, high) / physics_dt).round()
+            masked_update(self._actuation_delay_steps, steps.long(), reset_mask)
+            held = self.dof_pos_target.unsqueeze(1).expand_as(self._target_history)
+            masked_update(self._target_history, held, reset_mask)
+        fresh = reset_mask & self._physical_reset_mask
+        if self._ground_friction_varies():
+            # A continued timeout keeps walking on the ground it was on.
+            self._draw_ground_friction(fresh)
+        elif getattr(self.cfg, "fast_slides", None) is not None:
+            restore = fresh & self._fast_slide_friction_override
+            ids = restore.nonzero(as_tuple=False).flatten()
+            if ids.numel():
+                self._backend.set_contact_friction_by_body(
+                    ids,
+                    self.feet_indices,
+                    self._pre_fast_slide_friction.index_select(0, ids),
+                )
+                masked_update(
+                    self.foot_friction_obs, self._pre_fast_slide_friction, restore
+                )
+        self._fast_slide_friction_override.masked_fill_(fresh, False)
+
+    # Sliding stops: a robot that is moving when it gets a new command is
+    # sometimes told to stop, with a turn rate, for a short fixed time.
+
+    def _sliding_stops_enabled(self):
+        commands = self.cfg.commands
+        return (
+            getattr(commands, "sliding_stop_probability", 0.0) > 0.0
+            # Commands held for a whole episode (play, evaluation) stay as set.
+            and commands.resampling_time < self.cfg.env.episode_length_s
+        )
+
+    def _command_sliding_stops(self, command_mask):
+        """Replace the new command of some moving robots by a stop.
+
+        The stop is zero forward and sideways speed with a turn rate drawn
+        over the whole range, so one in five is a plain stop. Each robot whose
+        command is redrawn starts a new count or clears its old one.
+        """
+        if not self._sliding_stops_enabled():
+            return
+        commands = self.cfg.commands
+        speed = self.root_states[:, 7:9].norm(dim=1)
+        draw = self._uniform((self.num_envs,), 0.0, 1.0)
+        chosen = (
+            command_mask
+            & (speed > commands.sliding_stop_min_speed)
+            & (draw < commands.sliding_stop_probability)
+        )
+        limit = self.command_ranges["yaw_vel"]
+        turn = self._uniform((self.num_envs,), -limit, limit)
+        self.commands[:, :2].masked_fill_(chosen.unsqueeze(1), 0.0)
+        masked_update(self.commands[:, 2], turn, chosen)
+        steps = round(commands.sliding_stop_duration / self.dt)
+        self._sliding_stop_steps.masked_fill_(command_mask, 0)
+        self._sliding_stop_steps.masked_fill_(chosen, steps)
+
+    def _count_down_sliding_stops(self):
+        """Mark the stops whose time ends on this control step."""
+        if not self._sliding_stops_enabled():
+            return
+        running = self._sliding_stop_steps > 0
+        self._sliding_stop_steps -= running.long()
+        self._sliding_stop_ended = running & (self._sliding_stop_steps == 0)
+
+    # Fast slides: some fresh episodes start sliding fast on slippery ground
+    # with a stop already commanded, a case that is rare otherwise.
+
+    def _fast_slides_enabled(self):
+        slides = getattr(self.cfg, "fast_slides", None)
+        return (
+            getattr(slides, "probability", 0.0) > 0.0
+            and self._sliding_stops_enabled()
+            and getattr(self, "_ground_friction_range", None) is not None
+        )
+
+    def _start_fast_slides(self, reset_mask):
+        """Start some freshly placed robots fast on low friction, told to stop.
+
+        The robot moves along its heading at a speed from speed_range on
+        ground of one friction from friction_range under every foot, and gets
+        a sliding stop with a turn rate drawn over the whole range.
+        """
+        if not self._fast_slides_enabled():
+            return
+        slides = self.cfg.fast_slides
+        draw = self._uniform((self.num_envs,), 0.0, 1.0)
+        chosen = reset_mask & self._physical_reset_mask & (draw < slides.probability)
+        friction = self._uniform((self.num_envs, 1), *slides.friction_range)
+        speed = self._uniform((self.num_envs,), *slides.speed_range)
+        limit = self.command_ranges["yaw_vel"]
+        turn = self._uniform((self.num_envs,), -limit, limit)
+        ids = chosen.nonzero(as_tuple=False).flatten()
+        if ids.numel() == 0:
+            return
+        # Startup randomization can postdate buffer initialization. Read the
+        # current ground before saving the temporary slide's replacement.
+        self._refresh_friction_observation(chosen)
+        masked_update(self._pre_fast_slide_friction, self.foot_friction_obs, chosen)
+        self._fast_slide_friction_override |= chosen
+        friction = friction.expand_as(self.foot_friction_obs)
+        self._backend.set_contact_friction_by_body(
+            ids, self.feet_indices, friction.index_select(0, ids)
+        )
+        masked_update(self.foot_friction_obs, friction, chosen)
+        x, y, z, w = self.root_states[:, 3:7].unbind(dim=-1)
+        yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y.square() + z.square()))
+        velocity = torch.stack((yaw.cos() * speed, yaw.sin() * speed), dim=1)
+        self.root_states[ids, 7:9] = velocity[ids]
+        self._backend.reset_state(chosen)
+        self._refresh_base_observations(chosen)
+        self.commands[:, :2].masked_fill_(chosen.unsqueeze(1), 0.0)
+        masked_update(self.commands[:, 2], turn, chosen)
+        steps = round(self.cfg.commands.sliding_stop_duration / self.dt)
+        self._sliding_stop_steps.masked_fill_(chosen, steps)
+
+    # Falls: a robot tilted past falls.max_tilt degrees has fallen, even if
+    # its base has not touched the ground.
+
+    def _check_terminations_and_timeouts(self):
+        super()._check_terminations_and_timeouts()
+        tilt = getattr(getattr(self.cfg, "falls", None), "max_tilt", None)
+        if tilt is not None:
+            upright = -self.projected_gravity[:, 2]
+            self.terminated |= upright < math.cos(math.radians(tilt))
+
+    def _reward_yaw_overshoot(self):
+        """Penalise turning faster than commanded, beyond a tolerance [rad/s]."""
+        tolerance = getattr(self.cfg.reward_settings, "yaw_overshoot_tolerance", 0.0)
+        excess = self.base_ang_vel[:, 2].abs() - self._yaw_target().abs() - tolerance
+        return -excess.clamp(min=0.0).square()
+
+    # Actuation delay: the motors follow the target the policy issued a little
+    # earlier. Delays are whole physics steps and constant within an episode.
+
+    def _record_joint_targets(self):
+        self._physics_step_in_control_step = 0
+        if getattr(self, "_target_history", None) is None:
+            return
+        self._target_history = self._target_history.roll(1, dims=1)
+        self._target_history[:, 0] = self.dof_pos_target
+
+    def _joint_position_target(self):
+        history = getattr(self, "_target_history", None)
+        if history is None:
+            return self.dof_pos_target
+        decimation = self.cfg.control.decimation
+        late = self._actuation_delay_steps - self._physics_step_in_control_step
+        back = ((late + decimation - 1) // decimation).clamp(min=0)
+        return history[self._env_rows, back]
+
+    # Foot-force sensing: the clocks and the traction input see each foot's
+    # force through a gain that is fixed for the episode, a first-order lag
+    # and, for the load, noise. Rewards keep the true forces.
+
+    def _foot_load_is_sensed(self):
+        return (
+            self._sensing("foot_load_gain_range") is not None
+            or self._sensing("foot_load_noise_std", 0.0) > 0.0
+            or self._sensing("foot_force_time_constant", 0.0) > 0.0
+        )
+
+    def _refresh_sensed_foot_load(self, dt=None, reset_mask=None):
+        if not self._foot_load_is_sensed():
+            return
+        normal, _ = self._foot_loads()
+        measured = normal * self._foot_load_gain
+        if reset_mask is not None:
+            masked_update(self._foot_load_filter, measured, reset_mask)
+            masked_update(self._sensed_foot_load, measured.clamp(max=1.0), reset_mask)
+            return
+        lag = self._sensing("foot_force_time_constant", 0.0)
+        self._foot_load_filter.add_(
+            (dt / (lag + dt)) * (measured - self._foot_load_filter)
+        )
+        noise = self._sensing("foot_load_noise_std", 0.0) * self._normal(normal.shape)
+        self._sensed_foot_load.copy_((self._foot_load_filter + noise).clamp(0.0, 1.0))
+
+    def _sense_traction(self, ratio, reset_mask=None):
+        """Lag and scale the traction ratios the actor observes."""
+        lag = self._sensing("foot_force_time_constant", 0.0)
+        if self._sensing("foot_traction_gain_range") is None and lag <= 0.0:
+            return ratio
+        if reset_mask is None:
+            dt = self.dt / self.cfg.control.decimation
+            self._traction_filter.add_(
+                (dt / (lag + dt)) * (ratio - self._traction_filter)
+            )
+        else:
+            masked_update(self._traction_filter, ratio, reset_mask)
+        return self._traction_filter * self._foot_traction_gain.repeat_interleave(
+            2, dim=1
+        )
+
+    # Ground friction: with ``cfg.friction_changes`` the ground under a robot
+    # is redrawn at every fresh episode and at random moments within one, and
+    # with some probability each foot gets its own value.
+
+    def _ground_friction_varies(self):
+        changes = getattr(self.cfg, "friction_changes", None)
+        if changes is None or getattr(self, "_ground_friction_range", None) is None:
+            return False
+        return (
+            getattr(changes, "rate", 0.0) > 0.0
+            or getattr(changes, "split_probability", 0.0) > 0.0
+        )
+
+    def _draw_ground_friction(self, mask):
+        """Redraw the friction under the feet of the selected robots."""
+        ids = mask.nonzero(as_tuple=False).flatten()
+        if ids.numel() == 0:
+            return
+        low, high = self._ground_friction_range
+        shape = self.foot_friction_obs.shape
+        shared = self._uniform((self.num_envs, 1), low, high).expand(shape)
+        separate = self._uniform(shape, low, high)
+        probability = getattr(self.cfg.friction_changes, "split_probability", 0.0)
+        split = self._uniform((self.num_envs, 1), 0.0, 1.0) < probability
+        friction = torch.where(split, separate, shared)
+        self._backend.set_contact_friction_by_body(
+            ids, self.feet_indices, friction.index_select(0, ids)
+        )
+        masked_update(self.foot_friction_obs, friction, mask)
+
+    def _change_ground_friction(self):
+        """Poisson changes of ground friction, checked once per control step."""
+        if not self._ground_friction_varies():
+            return
+        rate = getattr(self.cfg.friction_changes, "rate", 0.0)
+        if rate <= 0.0:
+            return
+        self._draw_ground_friction(
+            self._uniform((self.num_envs,), 0.0, 1.0) < rate * self.dt
+        )
+
+    def _refresh_friction_estimate(self, reset_mask=None):
+        """What a friction estimator would tell the actor.
+
+        The mean friction under the four feet, through a first-order lag, a
+        gain fixed for the episode and noise. With none of these configured
+        it equals contact_friction_obs.
+        """
+        truth = self.foot_friction_obs.mean(dim=1, keepdim=True)
+        if reset_mask is None:
+            lag = self._sensing("friction_estimate_time_constant", 0.0)
+            self._friction_estimate_filter.add_(
+                (self.dt / (lag + self.dt)) * (truth - self._friction_estimate_filter)
+            )
+        else:
+            masked_update(self._friction_estimate_filter, truth, reset_mask)
+        estimate = self._friction_estimate_gain * self._friction_estimate_filter
+        noise = self._sensing("friction_estimate_noise_std", 0.0)
+        if noise > 0.0:
+            estimate = estimate + noise * self._normal(estimate.shape)
+        estimate = estimate.clamp(min=0.0)
+        if reset_mask is None:
+            self.friction_estimate_obs.copy_(estimate)
+        else:
+            masked_update(self.friction_estimate_obs, estimate, reset_mask)

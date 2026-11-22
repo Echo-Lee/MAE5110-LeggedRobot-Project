@@ -41,7 +41,7 @@ def test_friction_and_command_options_parse():
     assert args.friction == pytest.approx(0.1)
     assert args.command == [1.0, 0.0, -0.5]
     with pytest.raises(SystemExit):
-        get_play_args(["--task", "go2osc_push_glide", "--friction", "0"])
+        get_play_args(["--task", "go2osc_push_glide", "--friction", "-0.1"])
 
 
 def test_frame_stride_plays_back_in_real_time():
