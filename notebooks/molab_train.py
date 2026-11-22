@@ -359,6 +359,65 @@ def _(BOOTSTRAP_RUN, DEPLOY_ITERATIONS, ENV, REPO, RUN_DEPLOY_FINETUNE, SAVE_INT
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
+    ## One-click Go2 curriculum
+
+    After Setup and the GPU check, run the next cell once. It performs the
+    complete oracle → estimator → deploy workflow with no run names or stage
+    switches to edit. PPO checkpoints are written every 200 iterations.
+    """)
+    return
+
+
+@app.cell
+def _(ENV, REPO, subprocess):
+    def run(command):
+        print(" ".join(command), "\n", flush=True)
+        process = subprocess.Popen(
+            command, cwd=REPO, env=ENV, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, bufsize=1,
+        )
+        for line in process.stdout:
+            print(line, end="")
+        if process.wait() != 0:
+            raise RuntimeError(f"pipeline command exited with code {process.returncode}")
+
+    base = ["uv", "run", "--frozen", "--extra", "gpu", "--no-dev", "python"]
+    run(base + [
+        "scripts/train.py", "--task", "go2osc_push_glide_deploy_oracle",
+        "--device", "cuda:0", "--headless", "--num_envs", "4096",
+        "--max_iterations", "500", "--save_interval", "200",
+        "--experiment_name", "go2osc_push_glide_deploy_oracle", "--disable_wandb",
+    ])
+    root = REPO / "logs" / "go2osc_push_glide_deploy_oracle"
+    runs = sorted(
+        [p for p in root.glob("*") if (p / "model_500.pt").exists()],
+        key=lambda p: (p / "model_500.pt").stat().st_mtime, reverse=True,
+    )
+    if not runs:
+        raise RuntimeError("oracle training completed without model_500.pt")
+    checkpoint = runs[0] / "model_500.pt"
+    estimator = REPO / "logs" / "go2osc_deploy_estimator" / "estimator.pt"
+    run(base + [
+        "scripts/prepare_go2osc_deploy.py", "pretrain", "--checkpoint", str(checkpoint),
+        "--device", "cuda:0", "--num_envs", "4096", "--steps", "3000",
+        "--output", str(estimator),
+    ])
+    run(base + [
+        "scripts/prepare_go2osc_deploy.py", "bootstrap", "--checkpoint", str(checkpoint),
+        "--estimator", str(estimator), "--run-name", "oracle_bootstrap",
+    ])
+    run(base + [
+        "scripts/train.py", "--task", "go2osc_push_glide_deploy", "--device", "cuda:0",
+        "--headless", "--num_envs", "4096", "--resume", "--load_run", "oracle_bootstrap",
+        "--max_iterations", "3000", "--save_interval", "200", "--disable_wandb",
+    ])
+    print("\nGo2 curriculum finished")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
     ## 3 Download checkpoints
 
     Runs live at `logs/<experiment_name>/<Mon##_HH-MM-SS>_<run>/model_<iter>.pt`.
