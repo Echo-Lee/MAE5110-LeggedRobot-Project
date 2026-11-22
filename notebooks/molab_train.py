@@ -231,12 +231,14 @@ def _(mo):
 @app.cell
 def _():
     # --- edit, run this cell, then **run the next one** --------------------------
-    TASK = "go2osc_push_glide_deploy"
+    # Simulation-only diagnostic: the actor receives true friction and body
+    # velocity. Do not export this oracle policy to hardware.
+    TASK = "go2osc_push_glide_deploy_oracle"
     DEVICE = "cuda:0" # specifies which GPU to use - do not edit this line unless you know what this means!
     NUM_ENVS = 4096 # we specify multiples of 2 to compensate for the hardware.
     MAX_ITERATIONS = 4000
     SAVE_INTERVAL = 200
-    EXPERIMENT_NAME = "go2osc_push_glide_deploy"
+    EXPERIMENT_NAME = "go2osc_push_glide_deploy_oracle"
     RESUME = False  # resume the newest run for this experiment (if you stopped a training run)
     USE_WANDB = True
     return (

@@ -154,6 +154,16 @@ class Go2OscPushGlideDeploy(Go2OscPushGlideEst):
             self._refresh_onboard_push_signal(reset_mask)
 
 
+class Go2OscPushGlideDeployOracle(Go2OscPushGlideDeploy):
+    """Simulation-only ablation: true friction and velocity drive the clock."""
+
+    def _clock_friction(self):
+        return self.foot_friction_obs.mean(dim=1)
+
+    def _clock_start_speed(self):
+        return self.base_lin_vel[:, :1]
+
+
 def onboard_settings(env):
     """Everything go2osc_onboard.Go2OscOnboard needs, as plain numbers.
 

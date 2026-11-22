@@ -26,6 +26,7 @@ from gym.envs.go2.go2osc_config import (
 from gym.envs.go2.go2osc_est_config import (
     ESTIMATE_OBSERVATIONS,
     Go2OscPushGlideEstCfg,
+    TRUE_STATE_OBSERVATIONS,
 )
 from gym.envs.go2.go2osc_posture_config import Go2OscPushGlidePostureRunnerCfg
 
@@ -100,3 +101,18 @@ class Go2OscPushGlideDeployRunnerCfg(Go2OscPushGlideRobustRunnerCfg):
 
     class runner(Go2OscPushGlideRobustRunnerCfg.runner):
         experiment_name = "go2osc_push_glide_deploy"
+
+
+class Go2OscPushGlideDeployOracleCfg(Go2OscPushGlideDeployCfg):
+    """Simulation-only oracle ablation; never export this policy."""
+
+    class state_estimator(Go2OscPushGlideDeployCfg.state_estimator):
+        learn = False
+
+
+class Go2OscPushGlideDeployOracleRunnerCfg(Go2OscPushGlideDeployRunnerCfg):
+    class actor(Go2OscPushGlideDeployRunnerCfg.actor):
+        obs = PHASE_OBSERVATIONS + TRUE_STATE_OBSERVATIONS + ["clock_speed_obs"]
+
+    class runner(Go2OscPushGlideDeployRunnerCfg.runner):
+        experiment_name = "go2osc_push_glide_deploy_oracle"
