@@ -404,3 +404,13 @@ def test_friction_only_override_keeps_bins_and_resampling():
     apply_domain_randomization_override(cfg, "friction-only")
     assert cfg.domain_randomization.startup.contact_friction_bins == ICE_AND_GROUND
     assert cfg.domain_randomization.episode.resample_contact_friction is True
+
+
+def test_configs_saved_before_friction_bins_still_construct():
+    # Snapshots loaded with --original_cfg predate these three fields.
+    cfg = _cfg()
+    del cfg.domain_randomization.startup.contact_friction_bins
+    del cfg.domain_randomization.startup.contact_friction_bin_weights
+    del cfg.domain_randomization.episode.resample_contact_friction
+    assert contact_friction_bins(cfg) is None
+    DomainRandomizer(cfg, _RecordingBackend(4), "cpu")

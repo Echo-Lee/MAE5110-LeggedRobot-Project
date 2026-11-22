@@ -157,8 +157,9 @@ def contact_friction_bins(
     enable per-environment friction from that envelope alone.
     """
     startup = cfg.domain_randomization.startup
-    bins = startup.contact_friction_bins
-    weights = startup.contact_friction_bin_weights
+    # Configs saved before bins existed (--original_cfg) lack both fields.
+    bins = getattr(startup, "contact_friction_bins", None)
+    weights = getattr(startup, "contact_friction_bin_weights", None)
     if bins is None:
         if weights is not None:
             raise ValueError("contact-friction bin weights require bins")
@@ -217,8 +218,9 @@ class DomainRandomizer:
         if bins is not None:
             self._contact_friction_bins = torch.tensor(bins[0], device=device)
             self._contact_friction_bin_weights = torch.tensor(bins[1], device=device)
-        self._resample_contact_friction = (
-            cfg.domain_randomization.episode.resample_contact_friction
+        # Absent in configs saved before episodic resampling existed.
+        self._resample_contact_friction = getattr(
+            cfg.domain_randomization.episode, "resample_contact_friction", False
         )
         if self._resample_contact_friction and self._contact_friction_range is None:
             raise ValueError(
