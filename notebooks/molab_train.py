@@ -180,6 +180,13 @@ def _(mo):
 
     Below, we specify the task that we actually want to train on. Notice we have to specify
     the task *and* the device to train on.
+
+    For the Go2 deployment curriculum, start with
+    `go2osc_push_glide_deploy_oracle`, not `go2osc_push_glide_deploy`.
+    It keeps the final task's randomized commands/friction and deployable
+    torque-clock physics, but supplies true friction and body velocity to the
+    actor while it learns a gait. Download that run before estimator
+    pretraining and deployment fine-tuning.
     """)
     return
 
@@ -187,11 +194,14 @@ def _(mo):
 @app.cell
 def _():
     # --- edit, run this cell, then **run the next one** --------------------------
-    TASK = "go2trot"  # go2trot | mini_cheetah | humanoid | pendulum ...
+    # Stage 1 of the hardware curriculum.  Do not deploy this oracle policy:
+    # its actor reads simulator-only friction and velocity labels.
+    TASK = "go2osc_push_glide_deploy_oracle"
     DEVICE = "cuda:0" # specifies which GPU to use - do not edit this line unless you know what this means!
     NUM_ENVS = 4096 # we specify multiples of 2 to compensate for the hardware.
-    MAX_ITERATIONS = 550
-    EXPERIMENT_NAME = ""  # blank -> the task's default
+    MAX_ITERATIONS = 500
+    SAVE_INTERVAL = 200  # write model_200.pt, model_400.pt, ...
+    EXPERIMENT_NAME = "go2osc_push_glide_deploy_oracle"  # blank -> task default
     RESUME = False  # resume the newest run for this experiment (if you stopped a training run)
     USE_WANDB = False  # don't worry about this for now, we'll go over it later in the course.
     return (
@@ -200,6 +210,7 @@ def _():
         MAX_ITERATIONS,
         NUM_ENVS,
         RESUME,
+        SAVE_INTERVAL,
         TASK,
         USE_WANDB,
     )
@@ -214,6 +225,7 @@ def _(
     NUM_ENVS,
     REPO,
     RESUME,
+    SAVE_INTERVAL,
     TASK,
     USE_WANDB,
     subprocess,
@@ -224,6 +236,7 @@ def _(
     _cmd += ["--task", TASK, "--device", DEVICE, "--headless"]
     _cmd += ["--num_envs", str(int(NUM_ENVS))]
     _cmd += ["--max_iterations", str(int(MAX_ITERATIONS))]
+    _cmd += ["--save_interval", str(int(SAVE_INTERVAL))]
     if EXPERIMENT_NAME.strip():
         _cmd += ["--experiment_name", EXPERIMENT_NAME.strip()]
     if RESUME:
@@ -248,6 +261,98 @@ def _(
     if _proc.wait() != 0:
         raise RuntimeError(f"training exited with code {_proc.returncode}")
     print("\ntraining finished")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## 2b Deployment curriculum
+
+    Run these cells after Stage 1. Leave `ORACLE_RUN` blank to use the newest
+    oracle run. Each operation is opt-in, so re-running the notebook never
+    silently spends GPU time.
+    """)
+    return
+
+
+@app.cell
+def _():
+    ORACLE_RUN = ""  # blank -> newest go2osc_push_glide_deploy_oracle run
+    RUN_ESTIMATOR_PRETRAIN = False
+    ESTIMATOR_STEPS = 3000
+    RUN_DEPLOY_BOOTSTRAP = False
+    BOOTSTRAP_RUN = "oracle_bootstrap"
+    RUN_DEPLOY_FINETUNE = False
+    DEPLOY_ITERATIONS = 3000
+    SAVE_INTERVAL = 200
+    return (
+        BOOTSTRAP_RUN,
+        DEPLOY_ITERATIONS,
+        ESTIMATOR_STEPS,
+        ORACLE_RUN,
+        RUN_DEPLOY_BOOTSTRAP,
+        RUN_DEPLOY_FINETUNE,
+        RUN_ESTIMATOR_PRETRAIN,
+        SAVE_INTERVAL,
+    )
+
+
+@app.cell
+def _(ORACLE_RUN, REPO):
+    _oracle_root = REPO / "logs" / "go2osc_push_glide_deploy_oracle"
+    _runs = sorted(
+        [p for p in _oracle_root.glob("*") if p.is_dir() and list(p.glob("model_*.pt"))],
+        key=lambda p: max(q.stat().st_mtime for q in p.glob("model_*.pt")),
+        reverse=True,
+    )
+    oracle_run = REPO / "logs" / "go2osc_push_glide_deploy_oracle" / ORACLE_RUN if ORACLE_RUN else (_runs[0] if _runs else None)
+    oracle_checkpoint = oracle_run / "model_500.pt" if oracle_run else None
+    print(f"oracle checkpoint: {oracle_checkpoint}")
+    return oracle_checkpoint,
+
+
+@app.cell
+def _(ENV, ESTIMATOR_STEPS, REPO, RUN_ESTIMATOR_PRETRAIN, oracle_checkpoint, subprocess):
+    if RUN_ESTIMATOR_PRETRAIN:
+        if oracle_checkpoint is None or not oracle_checkpoint.exists():
+            raise RuntimeError("Stage 1 model_500.pt was not found")
+        subprocess.run([
+            "uv", "run", "--frozen", "--extra", "gpu", "--no-dev", "python",
+            "scripts/prepare_go2osc_deploy.py", "pretrain", "--checkpoint",
+            str(oracle_checkpoint), "--device", "cuda:0", "--num_envs", "4096",
+            "--steps", str(int(ESTIMATOR_STEPS)), "--output",
+            "logs/go2osc_deploy_estimator/estimator.pt",
+        ], cwd=REPO, env=ENV, check=True)
+    return
+
+
+@app.cell
+def _(BOOTSTRAP_RUN, ENV, REPO, RUN_DEPLOY_BOOTSTRAP, oracle_checkpoint, subprocess):
+    if RUN_DEPLOY_BOOTSTRAP:
+        if oracle_checkpoint is None or not oracle_checkpoint.exists():
+            raise RuntimeError("Stage 1 model_500.pt was not found")
+        estimator = REPO / "logs/go2osc_deploy_estimator/estimator.pt"
+        if not estimator.exists():
+            raise RuntimeError("run estimator pretraining first")
+        subprocess.run([
+            "uv", "run", "--frozen", "--extra", "gpu", "--no-dev", "python",
+            "scripts/prepare_go2osc_deploy.py", "bootstrap", "--checkpoint",
+            str(oracle_checkpoint), "--estimator", str(estimator), "--run-name", BOOTSTRAP_RUN,
+        ], cwd=REPO, env=ENV, check=True)
+    return
+
+
+@app.cell
+def _(BOOTSTRAP_RUN, DEPLOY_ITERATIONS, ENV, REPO, RUN_DEPLOY_FINETUNE, SAVE_INTERVAL, subprocess):
+    if RUN_DEPLOY_FINETUNE:
+        subprocess.run([
+            "uv", "run", "--frozen", "--extra", "gpu", "--no-dev", "python",
+            "scripts/train.py", "--task", "go2osc_push_glide_deploy", "--device", "cuda:0",
+            "--headless", "--num_envs", "4096", "--resume", "--load_run", BOOTSTRAP_RUN,
+            "--max_iterations", str(int(DEPLOY_ITERATIONS)), "--save_interval", str(int(SAVE_INTERVAL)),
+            "--disable_wandb",
+        ], cwd=REPO, env=ENV, check=True)
     return
 
 

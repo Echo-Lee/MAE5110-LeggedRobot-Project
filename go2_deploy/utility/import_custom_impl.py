@@ -4,7 +4,9 @@ from pathlib import Path
 
 # The team's implementation in go2_deploy/custom_implementation/. Set
 # GO2_CUSTOM_IMPL to deploy another file from that folder (e.g. go2trot_base.py).
-DEFAULT_CUSTOM_IMPL = "go2osc_push_glide.py"
+# The staff-facing adapter is named after the group, per the deployment
+# handoff requirement.  Override with GO2_CUSTOM_IMPL for another adapter.
+DEFAULT_CUSTOM_IMPL = "xuyi_chenyu_thomas.py"
 
 
 def get_custom_impl_module(name=None):
