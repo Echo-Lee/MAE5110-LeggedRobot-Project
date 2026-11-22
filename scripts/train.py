@@ -8,6 +8,7 @@ The selected backend is MuJoCo CPU/Warp or optional VSim.
 """
 
 import argparse
+from pathlib import Path
 
 from gym.utils.task_registry import task_registry
 from gym.utils.helpers import randomize_episode_counters, set_seed
@@ -81,6 +82,14 @@ def make_train_parser():
         action="store_true",
         help="Load environment and runner configs saved with the selected run.",
     )
+    parser.add_argument(
+        "--estimator_init",
+        type=str,
+        default=None,
+        help="Estimator file (estimator.pt) the task's in-env state estimator "
+        "starts from (sets state_estimator.init_path). A resumed checkpoint "
+        "that carries estimator weights replaces it.",
+    )
     parser.add_argument("--headless", action="store_true", default=False)
     # wandb
     parser.add_argument("--disable_wandb", action="store_true", default=False)
@@ -91,6 +100,25 @@ def make_train_parser():
 
 def get_train_args(argv=None):
     return make_train_parser().parse_args(argv)
+
+
+def apply_estimator_init(args, env_cfg):
+    """Point the task's in-env state estimator at --estimator_init.
+
+    The path is taken relative to the current directory and stored absolute,
+    so the environment does not read it relative to the repository root.
+    """
+    if getattr(args, "estimator_init", None) is None:
+        return
+    settings = getattr(env_cfg, "state_estimator", None)
+    if settings is None:
+        raise ValueError(
+            f"--estimator_init: task {args.task} has no in-env state estimator"
+        )
+    path = Path(args.estimator_init).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"--estimator_init: {path} not found")
+    settings.init_path = str(path)
 
 
 def setup(args=None, env_cfg=None, train_cfg=None):
@@ -131,6 +159,8 @@ def setup(args=None, env_cfg=None, train_cfg=None):
 
         env_cfg.seed = random.randint(0, 10000)
         train_cfg.seed = env_cfg.seed
+
+    apply_estimator_init(args, env_cfg)
 
     if args.experiment_name is not None:
         train_cfg.runner.experiment_name = args.experiment_name

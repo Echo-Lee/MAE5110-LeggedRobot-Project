@@ -106,3 +106,7 @@ notebooks/__marimo__/
 
 # Go2 visual meshes, downloaded by scripts/fetch_go2_meshes.py
 resources/robots/go2/mjcf/
+
+# Remove after updated
+update_README.md
+workflow.md

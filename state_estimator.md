@@ -63,6 +63,7 @@ Files to bring over from `ti237CU/dev`:
 - **Covariance**
 - **Target-cap the coefficient of friction**
 - **1 sec history**
+- **Feel the ground out for more information of mu?**
 
 ## Steps
 
