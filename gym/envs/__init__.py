@@ -22,6 +22,7 @@ class_dict = {
     "Go2Trot": ".go2.go2trot",
     "Go2OscPushGlide": ".go2.go2osc",
     "Go2OscPushGlideEst": ".go2.go2osc_est",
+    "Go2OscPushGlideRobustEst": ".go2.go2osc_robust_est",
 }
 
 config_dict = {
@@ -43,6 +44,7 @@ config_dict = {
     "Go2OscPushGlideF050Cfg": ".go2.go2osc_config",
     "Go2OscPushGlideRobustCfg": ".go2.go2osc_config",
     "Go2OscPushGlideEstCfg": ".go2.go2osc_est_config",
+    "Go2OscPushGlideRobustEstCfg": ".go2.go2osc_robust_est_config",
     "Go2OscPushGlidePostureCfg": ".go2.go2osc_posture_config",
 }
 
@@ -65,6 +67,7 @@ runner_config_dict = {
     "Go2OscPushGlideF050RunnerCfg": ".go2.go2osc_config",
     "Go2OscPushGlideRobustRunnerCfg": ".go2.go2osc_config",
     "Go2OscPushGlideEstRunnerCfg": ".go2.go2osc_est_config",
+    "Go2OscPushGlideRobustEstRunnerCfg": ".go2.go2osc_robust_est_config",
     "Go2OscPushGlideBlindRunnerCfg": ".go2.go2osc_est_config",
     "Go2OscPushGlideOracleRunnerCfg": ".go2.go2osc_est_config",
     "Go2OscPushGlidePostureRunnerCfg": ".go2.go2osc_posture_config",
@@ -128,6 +131,11 @@ task_dict = {
         "Go2OscPushGlideEst",
         "Go2OscPushGlideEstCfg",
         "Go2OscPushGlideEstRunnerCfg",
+    ],
+    "go2osc_push_glide_robust_est": [
+        "Go2OscPushGlideRobustEst",
+        "Go2OscPushGlideRobustEstCfg",
+        "Go2OscPushGlideRobustEstRunnerCfg",
     ],
     "go2osc_push_glide_blind": [
         "Go2OscPushGlideEst",
