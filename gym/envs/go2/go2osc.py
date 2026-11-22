@@ -1778,6 +1778,8 @@ class Go2OscPushGlide(Go2OscSpeedTargetMixin, Go2OscDirectional):
             if not number(floor) or floor <= 0.0:
                 raise ValueError("clock_speed_min_friction must be finite and positive")
         if getattr(settings, "speed_reference_carve", False):
+            if not getattr(settings, "speed_reference", False):
+                raise ValueError("speed_reference_carve needs speed_reference")
             floor = getattr(settings, "speed_reference_carve_min_brake", None)
             if not number(floor) or not 0.0 <= floor <= 1.0:
                 raise ValueError("speed_reference_carve_min_brake must lie in [0, 1]")
@@ -1837,6 +1839,10 @@ class Go2OscPushGlide(Go2OscSpeedTargetMixin, Go2OscDirectional):
         self.foot_friction_obs = self._backend.contact_friction.unsqueeze(1).repeat(
             1, 4
         )
+        self._pre_fast_slide_friction = self.foot_friction_obs.clone()
+        self._fast_slide_friction_override = torch.zeros(
+            n, dtype=torch.bool, device=device
+        )
         self._friction_estimate_gain = torch.ones(n, 1, device=device)
         self._friction_estimate_filter = self.foot_friction_obs.mean(
             dim=1, keepdim=True
@@ -1878,6 +1884,8 @@ class Go2OscPushGlide(Go2OscSpeedTargetMixin, Go2OscDirectional):
 
     def _resample_variation(self, reset_mask):
         """Draw the per-episode sensor gains, delay and ground of reset robots."""
+        # Gains and delay follow logical episodes; only ground waits for a
+        # fresh physical reset.
         for name, gain in (
             ("friction_estimate_gain_range", self._friction_estimate_gain),
             ("foot_load_gain_range", self._foot_load_gain),
@@ -1893,9 +1901,23 @@ class Go2OscPushGlide(Go2OscSpeedTargetMixin, Go2OscDirectional):
             masked_update(self._actuation_delay_steps, steps.long(), reset_mask)
             held = self.dof_pos_target.unsqueeze(1).expand_as(self._target_history)
             masked_update(self._target_history, held, reset_mask)
+        fresh = reset_mask & self._physical_reset_mask
         if self._ground_friction_varies():
             # A continued timeout keeps walking on the ground it was on.
-            self._draw_ground_friction(reset_mask & self._physical_reset_mask)
+            self._draw_ground_friction(fresh)
+        elif getattr(self.cfg, "fast_slides", None) is not None:
+            restore = fresh & self._fast_slide_friction_override
+            ids = restore.nonzero(as_tuple=False).flatten()
+            if ids.numel():
+                self._backend.set_contact_friction_by_body(
+                    ids,
+                    self.feet_indices,
+                    self._pre_fast_slide_friction.index_select(0, ids),
+                )
+                masked_update(
+                    self.foot_friction_obs, self._pre_fast_slide_friction, restore
+                )
+        self._fast_slide_friction_override.masked_fill_(fresh, False)
 
     # Sliding stops: a robot that is moving when it gets a new command is
     # sometimes told to stop, with a turn rate, for a short fixed time.
@@ -1971,6 +1993,11 @@ class Go2OscPushGlide(Go2OscSpeedTargetMixin, Go2OscDirectional):
         ids = chosen.nonzero(as_tuple=False).flatten()
         if ids.numel() == 0:
             return
+        # Startup randomization can postdate buffer initialization. Read the
+        # current ground before saving the temporary slide's replacement.
+        self._refresh_friction_observation(chosen)
+        masked_update(self._pre_fast_slide_friction, self.foot_friction_obs, chosen)
+        self._fast_slide_friction_override |= chosen
         friction = friction.expand_as(self.foot_friction_obs)
         self._backend.set_contact_friction_by_body(
             ids, self.feet_indices, friction.index_select(0, ids)

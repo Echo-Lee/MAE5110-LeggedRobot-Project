@@ -129,6 +129,16 @@ def test_invalid_variation_settings_fail_before_simulation(section, name, value)
         Go2OscPushGlide._validate_push_glide_cfg(cfg)
 
 
+def test_carving_requires_the_speed_reference_that_updates_its_yaw_target():
+    cfg = configs.Go2OscPushGlideRobustCfg()
+    cfg.osc.clock_follows_speed_target = False
+    cfg.reward_settings.speed_reference = False
+    with pytest.raises(ValueError, match="speed_reference_carve needs speed_reference"):
+        Go2OscPushGlide._validate_push_glide_cfg(cfg)
+    cfg.reward_settings.speed_reference_carve = False
+    Go2OscPushGlide._validate_push_glide_cfg(cfg)
+
+
 def test_motors_follow_the_target_issued_one_delay_earlier():
     delays = torch.tensor([0, 3, 5, 7, 10])
     env = _varied_env(5, delay=[0.0, 0.02])
@@ -1126,6 +1136,62 @@ def _foot_contact_friction_values(backend, env):
         for geom, column in zip(geoms, columns):
             values[i, int(column)] = float(friction[int(geom), 0])
     return values
+
+
+@pytest.mark.parametrize("ordinary_friction", [0.8, 0.9])
+def test_fast_slide_ground_restores_only_on_the_next_physical_reset(ordinary_friction):
+    def configure(cfg):
+        cfg.init_state.reset_mode = "reset_to_basic"
+        cfg.domain_randomization.startup.contact_friction_range = [
+            ordinary_friction,
+            ordinary_friction,
+        ]
+        cfg.friction_changes.rate = 0.0
+        cfg.friction_changes.split_probability = 0.0
+        cfg.fast_slides.probability = 1.0
+        cfg.fast_slides.friction_range = [0.1, 0.1]
+
+    env, _, backend = _make_robust_env(num_envs=4, configure=configure)
+    try:
+        slide_ground = torch.full((4, 4), 0.1)
+        torch.testing.assert_close(
+            _foot_contact_friction_values(backend, env), slide_ground
+        )
+        env.cfg.fast_slides.probability = 0.0
+        everyone = torch.ones(4, dtype=torch.bool)
+
+        # Logical timeout resets continue moving on the slide's ground.
+        env.cfg.osc.timeout_physical_reset_probability = 0.0
+        env.timed_out[:] = True
+        env.terminated[:] = False
+        env._reset_idx(everyone)
+        assert not env._physical_reset_mask.any()
+        torch.testing.assert_close(
+            _foot_contact_friction_values(backend, env), slide_ground
+        )
+
+        # A fresh ordinary episode restores only the selected environments.
+        fresh = torch.tensor([True, False, False, True])
+        env.timed_out[:] = False
+        env.terminated[:] = fresh
+        env._reset_idx(fresh)
+        expected = slide_ground.clone()
+        expected[fresh] = ordinary_friction
+        torch.testing.assert_close(
+            _foot_contact_friction_values(backend, env), expected
+        )
+        torch.testing.assert_close(env.foot_friction_obs, expected)
+        torch.testing.assert_close(backend.contact_friction, expected[:, 0])
+
+        # Subsequent fresh resets do not reapply an obsolete slide override.
+        env.terminated[:] = True
+        env._reset_idx(everyone)
+        torch.testing.assert_close(
+            _foot_contact_friction_values(backend, env),
+            torch.full((4, 4), ordinary_friction),
+        )
+    finally:
+        backend.close()
 
 
 @pytest.mark.parametrize("change", ["probability", "held"])
