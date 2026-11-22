@@ -173,6 +173,32 @@ def _(ENV, REPO, subprocess):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
+    ## W&B authentication
+
+    Add `WANDB_API_KEY` as a MoLab secret/environment variable, then run the
+    next cell. The key is read only from the runtime environment and is never
+    printed or written into this notebook.
+    """)
+    return
+
+
+@app.cell
+def _(ENV, os):
+    _wandb_key = os.environ.get("WANDB_API_KEY", "").strip()
+    if not _wandb_key:
+        raise RuntimeError(
+            "Set the WANDB_API_KEY MoLab secret before running training."
+        )
+    # The training subprocess inherits ENV; retain the secret there even when
+    # the host subsequently changes its process environment.
+    ENV["WANDB_API_KEY"] = _wandb_key
+    print("W&B API key loaded from the runtime secret.")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
     ## 2 Train
 
     Here, as this is running on GPU, we use `MuJoCo-Warp`, which makes use of the parallel
