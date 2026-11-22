@@ -47,6 +47,10 @@ class MuJocoCPUBackend(MuJocoBackendBase):
         self._show_ui = False  # overridden from cfg.viewer.show_ui in setup()
         self._viewer_key_callback = None
         self._viewer_overlay_fn = None  # called each render() before sync()
+        # Root-tracking camera request; applied to the viewer on the next
+        # render(), since the viewer is created lazily there.
+        self._camera_tracking = False
+        self._camera_tracking_dirty = False
         self._render_deadline = None
         self._render_pending_time = 0.0
         self._randomize_contact_friction = False
@@ -154,10 +158,13 @@ class MuJocoCPUBackend(MuJocoBackendBase):
         self._randomize_contact_friction = contact_friction_range(cfg) is not None
         self._randomize_link_mass = link_mass_scale_range(cfg) is not None
         headless = task.headless if task is not None else True
+        # Off-screen rendering (video recording) is headless but still draws:
+        # load visuals for it as for the interactive viewer.
+        renders = not headless or getattr(cfg.asset, "render_offscreen", False)
         visual_model = getattr(cfg.asset, "mujoco_visual_model", None)
         visual_model_path = (
             visual_model.format(GYM_ROOT_DIR=GYM_ROOT_DIR)
-            if visual_model is not None and not headless
+            if visual_model is not None and renders
             else None
         )
         if visual_model_path is not None and not os.path.isfile(visual_model_path):
@@ -169,7 +176,7 @@ class MuJocoCPUBackend(MuJocoBackendBase):
 
         mjm = self._load_model(
             cfg,
-            discard_visual=self._randomize_link_mass and headless,
+            discard_visual=self._randomize_link_mass and not renders,
             visual_model_path=visual_model_path,
         )
         self._configure_model(mjm, cfg, device)
@@ -197,8 +204,9 @@ class MuJocoCPUBackend(MuJocoBackendBase):
         )
 
         # Mass changes require environment-specific derived model constants.
-        # The headless model has already discarded visual assets, so private
-        # copies remain compact. Other serial worlds share one model.
+        # A headless training model has already discarded visual assets, so
+        # private copies stay compact; an off-screen recording keeps them
+        # (it runs few environments). Other serial worlds share one model.
         if self._randomize_link_mass:
             self._models = [mjm] + [copy.copy(mjm) for _ in range(num_envs - 1)]
             self._datas = [mujoco.MjData(model) for model in self._models]
@@ -332,6 +340,46 @@ class MuJocoCPUBackend(MuJocoBackendBase):
 
     # ── Rendering ─────────────────────────────────────────────────────────────
 
+    # Initial framing when tracking starts; the user can still orbit and zoom
+    # around the tracked body with the mouse.
+    TRACKING_DISTANCE_M = 1.5
+    TRACKING_ELEVATION_DEG = -20.0
+    TRACKING_AZIMUTH_DEG = 135.0
+
+    @property
+    def camera_tracking(self) -> bool:
+        return self._camera_tracking
+
+    @property
+    def supports_camera_tracking(self) -> bool:
+        """Only a floating-base robot has a root body to follow."""
+        return self._has_free_joint
+
+    def set_camera_tracking(self, enabled: bool) -> None:
+        """Lock the viewer camera onto environment 0's floating base.
+
+        The passive viewer draws ``self._datas[0]``, so environment 0 is the
+        robot on screen. Disabling leaves the camera where it is, free.
+        """
+        if enabled and not self._has_free_joint:
+            raise ValueError("camera tracking needs a floating-base robot")
+        self._camera_tracking = enabled
+        self._camera_tracking_dirty = True
+
+    def _apply_camera_tracking(self, viewer) -> None:
+        with viewer.lock():
+            if self._camera_tracking:
+                viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+                # The free joint is joint 0 and sits on the robot's root body.
+                viewer.cam.trackbodyid = int(self._mjm.jnt_bodyid[0])
+                viewer.cam.distance = self.TRACKING_DISTANCE_M
+                viewer.cam.elevation = self.TRACKING_ELEVATION_DEG
+                viewer.cam.azimuth = self.TRACKING_AZIMUTH_DEG
+            else:
+                viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+                viewer.cam.trackbodyid = -1
+        self._camera_tracking_dirty = False
+
     def render(self, sync_frame_time: bool = True) -> None:
         import platform
         import mujoco.viewer
@@ -380,6 +428,8 @@ class MuJocoCPUBackend(MuJocoBackendBase):
             else:
                 self._render_deadline = now if sync_frame_time else None
             self._render_pending_time = 0.0
+            if self._camera_tracking_dirty:
+                self._apply_camera_tracking(self._viewer)
             if self._viewer_overlay_fn is not None:
                 self._viewer_overlay_fn(self._viewer)
             self._viewer.sync()
