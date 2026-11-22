@@ -1,4 +1,8 @@
+import re
+import shutil
 import sys
+import warnings
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -140,3 +144,43 @@ def test_train_and_play_accept_original_cfg_flag():
 
     assert train_args.original_cfg is True
     assert play_args.original_cfg is True
+
+
+def test_run_saved_before_friction_bins_loads_and_constructs(tmp_path):
+    """A pre-bins snapshot (--original_cfg) builds and steps the current task."""
+    current = Path(current_envs.__file__).parent
+    saved_envs = tmp_path / "run_a" / "files" / "gym" / "envs"
+    shutil.copytree(current, saved_envs, ignore=shutil.ignore_patterns("__pycache__"))
+    old_dr = saved_envs / "base" / "domain_randomization.py"
+    text = re.sub(
+        r"\n\s*(contact_friction_bins|contact_friction_bin_weights"
+        r"|resample_contact_friction) = (None|False)",
+        "",
+        old_dr.read_text(),
+    )
+    old_dr.write_text(text)
+
+    env_cfg, train_cfg = load_original_cfgs_from_run(
+        "go2osc_push_glide", tmp_path / "run_a"
+    )
+    startup = env_cfg.domain_randomization.startup
+    assert not hasattr(startup, "contact_friction_bins")
+    assert not hasattr(
+        env_cfg.domain_randomization.episode, "resample_contact_friction"
+    )
+
+    env_cfg.env.num_envs = 2
+    env_cfg.seed = train_cfg.seed = 0
+    train_cfg.runner.device = "cpu"
+    from gym.utils.task_registry import task_registry
+
+    task_registry.convert_frequencies_to_params(env_cfg, train_cfg)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        env = task_registry.make_env(
+            "go2osc_push_glide", env_cfg, device="cpu", headless=True
+        )
+    try:
+        env.step()
+    finally:
+        env._backend.close()

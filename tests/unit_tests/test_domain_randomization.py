@@ -30,9 +30,12 @@ def _domain_randomization_cfg(
     return SimpleNamespace(
         startup=SimpleNamespace(
             contact_friction_range=contact_friction,
+            contact_friction_bins=None,
+            contact_friction_bin_weights=None,
             link_mass_scale_range=link_mass,
         ),
         episode=SimpleNamespace(
+            resample_contact_friction=False,
             scale_ranges={
                 name: values
                 for name, values in (
@@ -40,7 +43,7 @@ def _domain_randomization_cfg(
                     ("d_gains", damping),
                 )
                 if values is not None
-            }
+            },
         ),
     )
 
