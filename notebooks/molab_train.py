@@ -115,8 +115,8 @@ def _(mo):
 @app.cell
 def _():
     # --- edit, run this cell, then run the next one --------------------------
-    BRANCH = "main"
-    REPO_URL = "https://github.com/LampLighterLab/BigRedGym.git"
+    BRANCH = "cl2858/concurrent_training"
+    REPO_URL = "https://github.com/Echo-Lee/MAE5110-LeggedRobot-Project.git"
     return BRANCH, REPO_URL
 
 
@@ -187,19 +187,21 @@ def _(mo):
 @app.cell
 def _():
     # --- edit, run this cell, then **run the next one** --------------------------
-    TASK = "go2trot"  # go2trot | mini_cheetah | humanoid | pendulum ...
+    TASK = "go2osc_push_glide_deploy"
     DEVICE = "cuda:0" # specifies which GPU to use - do not edit this line unless you know what this means!
     NUM_ENVS = 4096 # we specify multiples of 2 to compensate for the hardware.
-    MAX_ITERATIONS = 550
-    EXPERIMENT_NAME = ""  # blank -> the task's default
+    MAX_ITERATIONS = 4000
+    SAVE_INTERVAL = 200
+    EXPERIMENT_NAME = "go2osc_push_glide_deploy"
     RESUME = False  # resume the newest run for this experiment (if you stopped a training run)
-    USE_WANDB = False  # don't worry about this for now, we'll go over it later in the course.
+    USE_WANDB = True
     return (
         DEVICE,
         EXPERIMENT_NAME,
         MAX_ITERATIONS,
         NUM_ENVS,
         RESUME,
+        SAVE_INTERVAL,
         TASK,
         USE_WANDB,
     )
@@ -214,6 +216,7 @@ def _(
     NUM_ENVS,
     REPO,
     RESUME,
+    SAVE_INTERVAL,
     TASK,
     USE_WANDB,
     subprocess,
@@ -224,6 +227,7 @@ def _(
     _cmd += ["--task", TASK, "--device", DEVICE, "--headless"]
     _cmd += ["--num_envs", str(int(NUM_ENVS))]
     _cmd += ["--max_iterations", str(int(MAX_ITERATIONS))]
+    _cmd += ["--save_interval", str(int(SAVE_INTERVAL))]
     if EXPERIMENT_NAME.strip():
         _cmd += ["--experiment_name", EXPERIMENT_NAME.strip()]
     if RESUME:
