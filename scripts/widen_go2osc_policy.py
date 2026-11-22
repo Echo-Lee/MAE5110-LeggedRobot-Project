@@ -8,7 +8,8 @@ fine-tuning is a plain resume:
 
     uv run scripts/widen_go2osc_policy.py \
         --policy-dir logs/go2osc_posture1800/go2osc_push_glide \
-        --estimator logs/go2osc_push_glide_est/pretrain_posture1800_noise_jacobian_s1/estimator.pt
+        --estimator \
+        logs/go2osc_push_glide_est/pretrain_posture1800_noise_jacobian_s1/estimator.pt
     uv run scripts/train.py --task go2osc_push_glide_est --resume \
         --load_run widened_posture1800 --max_iterations 500 --device cuda:0 --headless
 
@@ -63,7 +64,8 @@ def arguments():
         "--estimator",
         type=Path,
         default=ROOT
-        / "logs/go2osc_push_glide_est/pretrain_posture1800_noise_jacobian_s1/estimator.pt",
+        / "logs/go2osc_push_glide_est"
+        / "pretrain_posture1800_noise_jacobian_s1/estimator.pt",
     )
     parser.add_argument("--run_name", default="widened_posture1800")
     parser.add_argument("--num_envs", type=int, default=256)
