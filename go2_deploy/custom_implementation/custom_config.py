@@ -25,6 +25,10 @@ class CustomConfig(ABC):
         "custom_obs_sizes": dict,
         # Class whose attributes are the scale for each observation piece
         "DeployScaling": type,
+        # Static default posture (rad) that actions are offsets from: 12
+        # joint angles in FL, FR, RL, RR order, hip, thigh, calf within each
+        # leg. Must match the default joint angles the policy was trained with.
+        "default_dof_pos": list,
     }
 
     def __init_subclass__(cls, **kwargs):

@@ -20,8 +20,6 @@ SDK_IN_QGYM_ORDER = [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
 def _controller(cfg=None):
     if cfg is None:
         cfg = DeployConfig(load_custom_impl("go2trot"))
-    if cfg.default_dof_pos is None:  # normally set from the policy's run
-        cfg.default_dof_pos = torch.tensor([0.0, 0.96, -1.36] * 4)  # Go2 nominal
     return SimpleNamespace(
         cfg=cfg,
         obs_vec_size=sum(cfg.obs_sizes[name] for name in cfg.obs_vector),

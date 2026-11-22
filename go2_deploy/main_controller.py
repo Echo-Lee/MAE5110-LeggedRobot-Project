@@ -37,11 +37,6 @@ class MainController:
         self._shutdown_flag = False
         self.shut_down = False  # set once a requested shutdown has finished
 
-        if cfg.default_dof_pos is None:
-            raise ValueError(
-                "cfg.default_dof_pos is unset: build the policy with "
-                "setup_actor() or load_bundle() before the MainController"
-            )
         self.cfg = cfg
         self.rl_controller = rl_controller
         self.remote_controller = UnitreeRemoteController(cfg)

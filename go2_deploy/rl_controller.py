@@ -7,7 +7,6 @@ from gym import GYM_ROOT_DIR
 from gym.utils.helpers import select_model, set_seed
 from gym.utils.original_cfg import original_cfg_source_dir, original_task_from_run
 from gym.utils.task_registry import select_backend, task_registry
-from go2_deploy.deploy_config import default_dof_pos_from_env_cfg
 
 LOG_ROOT = Path(GYM_ROOT_DIR) / "logs"
 
@@ -32,7 +31,6 @@ def resolve_run_dir(task_name, run_name=None):
 # task_name comes from deploy_cfg.custom_impl. The task class, env and train
 # configs all come from that run's saved source, not from the repo's gym.envs;
 # the only code taken from outside the log is the CustomConfig extension.
-# Also sets deploy_cfg.default_dof_pos from the run's env config.
 # Builds the training env, so only use this on the PC; the robot loads bundles.
 def setup_actor(run_name=None, deploy_cfg=None):
     if deploy_cfg is None:
@@ -80,7 +78,6 @@ def setup_actor(run_name=None, deploy_cfg=None):
         print(f"Loading model from: {checkpoint}")
         runner.load(str(checkpoint))
         runner.switch_to_eval()
-        deploy_cfg.default_dof_pos = default_dof_pos_from_env_cfg(env_cfg)
         deploy_cfg.run_dir = str(run_dir)
 
     actor = runner.alg.actor

@@ -54,10 +54,11 @@ class DeployConfig:
 
         self.obs_sizes.update(self.custom_impl.custom_obs_sizes)
 
-        # Static default posture the actions are offsets from. Comes from the
-        # policy's run: set by rl_controller.setup_actor() (from the run's env
-        # config) or policy_bundle.load_bundle() (from deploy_meta.json).
-        self.default_dof_pos = None
+        # Static default posture the actions are offsets from (canonical
+        # FL, FR, RL, RR order; hip, thigh, calf within each leg)
+        self.default_dof_pos = torch.tensor(
+            self.custom_impl.default_dof_pos, dtype=torch.float
+        )
         # Training run the policy came from; set by setup_actor()
         self.run_dir = None
 
@@ -83,15 +84,8 @@ class DeployConfig:
         for obs in self.obs_vector:
             if obs not in self.obs_sizes:
                 raise KeyError("observation " + obs + " not supported")
-
-
-# Canonical FL, FR, RL, RR order; hip, thigh, calf within each leg.
-def default_dof_pos_from_env_cfg(env_cfg):
-    angles = env_cfg.init_state.default_joint_angles
-    return torch.tensor(
-        [
-            float(angles[name])
-            for leg in ("FL", "FR", "RL", "RR")
-            for name in ("hip_joint", f"{leg}_thigh_joint", "calf_joint")
-        ]
-    )
+        if self.default_dof_pos.shape != (12,):
+            raise ValueError(
+                f"default_dof_pos should have 12 joint angles, "
+                f"got shape {tuple(self.default_dof_pos.shape)}"
+            )

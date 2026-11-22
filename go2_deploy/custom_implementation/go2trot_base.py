@@ -26,6 +26,9 @@ class Go2TrotBase(CustomConfig):
         "phase_frequency": 1,
     }
 
+    # Default joint angles (rad): FL, FR, RL, RR; hip, thigh, calf in each leg
+    default_dof_pos = 4 * [0.0, 0.96, -1.36]
+
     class DeployScaling:
         base_ang_vel = 0.3
         base_lin_vel = 0.4
