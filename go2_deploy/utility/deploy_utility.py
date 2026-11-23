@@ -1,5 +1,5 @@
 import torch
-from gym.utils.torch_quat import quat_rotate_inverse
+from go2_deploy.custom_implementation.go2osc_push_glide import quat_rotate_inverse
 
 # Unitree motor order: Front Right hip (haa), FR thigh (hfe), FR calf (kfe),
 # Front Left ... Rear Right ... Rear Left

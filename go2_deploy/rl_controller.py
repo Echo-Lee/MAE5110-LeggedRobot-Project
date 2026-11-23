@@ -3,12 +3,7 @@ import random
 
 import torch
 
-from gym import GYM_ROOT_DIR
-from gym.utils.helpers import select_model, set_seed
-from gym.utils.original_cfg import original_cfg_source_dir, original_task_from_run
-from gym.utils.task_registry import select_backend, task_registry
-
-LOG_ROOT = Path(GYM_ROOT_DIR) / "logs"
+LOG_ROOT = Path(__file__).resolve().parents[1] / "logs"
 
 
 def resolve_run_dir(task_name, run_name=None):
@@ -33,6 +28,12 @@ def resolve_run_dir(task_name, run_name=None):
 # the only code taken from outside the log is the CustomConfig extension.
 # Builds the training env, so only use this on the PC; the robot loads bundles.
 def setup_actor(run_name=None, deploy_cfg=None):
+    # Only raw training-log reconstruction needs simulation/training modules.
+    # An exported-policy RLController must run without gym installed.
+    from gym.utils.helpers import select_model, set_seed
+    from gym.utils.original_cfg import original_cfg_source_dir, original_task_from_run
+    from gym.utils.task_registry import select_backend, task_registry
+
     if deploy_cfg is None:
         raise ValueError("Must pass the DeployConfig built from the task's custom_impl")
     task_name = deploy_cfg.task_name
