@@ -782,8 +782,8 @@ def test_deploy_file_reproduces_the_training_observation(bundle, monkeypatch, ca
     module = _load_deploy_module()
     monkeypatch.setenv(module.BUNDLE_VARIABLE, str(directory))
     monkeypatch.setattr("sys.argv", ["deploy"])
-    monkeypatch.setattr(deploy_utility, "custom_impl", module)
-    policy, cfg = load_bundle(str(directory))
+    implementation = module.Go2OscPushGlide()
+    policy, cfg = load_bundle(str(directory), implementation)
     row = 0
     everyone = torch.ones(NUM_ENVS, dtype=torch.bool)
     env.commands[:] = _command_schedule(0)
@@ -811,14 +811,14 @@ def test_deploy_file_reproduces_the_training_observation(bundle, monkeypatch, ca
         last_lowstate_msg=None,
         _state=SimpleNamespace(name="RECOVERY"),
     )
-    for key, value in module.get_custom_buffers_dict().items():
+    for key, value in implementation.get_custom_buffers_dict().items():
         setattr(controller, key, value)
 
     def tick(command):
         remote.lin_vel_x, remote.lin_vel_y, remote.yaw_vel = command[row].tolist()
         controller.last_lowstate_msg = _lowstate(env, row)
         controller.last_action[0] = env.dof_pos_target[row]
-        module.update_custom_buffers(controller, 0.0)
+        implementation.update_custom_buffers(controller, 0.0)
         return deploy_utility.lowstate_to_obs(controller, controller.last_lowstate_msg)
 
     assert max(limits.values()) == pytest.approx(2.0)
@@ -826,7 +826,7 @@ def test_deploy_file_reproduces_the_training_observation(bundle, monkeypatch, ca
     observation = tick(env.commands)
     controller._state = SimpleNamespace(name="CUSTOM_CTRL")
     # At takeover it reports the on-board signals for a check by eye.
-    module.update_custom_buffers(controller, 10.0)
+    implementation.update_custom_buffers(controller, 10.0)
     report = capsys.readouterr().out
     assert "go2osc check | foot load" in report and "accelerometer" in report
     controller.go2osc_running = False
@@ -863,7 +863,7 @@ def test_deploy_file_clips_commands_and_zeroes_a_released_stick(bundle, monkeypa
     module = _load_deploy_module()
     monkeypatch.setenv(module.BUNDLE_VARIABLE, str(directory))
     monkeypatch.setattr("sys.argv", ["deploy"])
-    settings = module.get_custom_buffers_dict()["go2osc_settings"]
+    settings = module.Go2OscPushGlide().get_custom_buffers_dict()["go2osc_settings"]
     controller = SimpleNamespace(
         cfg=SimpleNamespace(
             command_limits={"lin_vel_x": 2.0, "lin_vel_y": 0.3, "yaw_vel": 0.5}
@@ -889,7 +889,7 @@ def test_deploy_file_needs_a_bundle_and_refuses_action_smoothing(bundle, monkeyp
     monkeypatch.delenv(module.BUNDLE_VARIABLE, raising=False)
     monkeypatch.setattr("sys.argv", ["deploy", "eth0"])
     with pytest.raises(RuntimeError, match="policy bundle"):
-        module.get_custom_buffers_dict()
+        module.Go2OscPushGlide().get_custom_buffers_dict()
     monkeypatch.setattr("sys.argv", ["deploy", "eth0", "--bundle", str(directory)])
     assert module.bundle_directory() == directory
     settings = module.load_onboard(directory)[1]

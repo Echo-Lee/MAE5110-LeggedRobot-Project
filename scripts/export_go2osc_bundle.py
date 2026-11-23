@@ -120,6 +120,7 @@ def export(env, runner, out_dir, checkpoint, task=TASK, provenance=None):
     """Write the bundle for a loaded (environment, runner). Returns its hashes."""
     from go2_deploy.deploy_config import DeployConfig
     from go2_deploy.policy_bundle import export_bundle
+    from go2_deploy.utility.import_custom_impl import load_custom_impl
 
     share = getattr(env, "estimate_share", 1.0)
     if share < 1.0:
@@ -147,7 +148,7 @@ def export(env, runner, out_dir, checkpoint, task=TASK, provenance=None):
     low, high = (torch.tensor(bound) for bound in settings["target_offset_bounds"])
     actor = ClampedActor(copy.deepcopy(runner.alg.actor), low / scale, high / scale)
 
-    cfg = DeployConfig()
+    cfg = DeployConfig(load_custom_impl(task))
     cfg.task_name = task
     cfg.obs_vector = list(runner.actor_cfg["obs"])
     cfg.kp = settings["stiffness"]
