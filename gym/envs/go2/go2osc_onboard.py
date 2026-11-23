@@ -10,6 +10,8 @@ robot has:
     IMU                   gyro, gravity     [rad/s], unit vector
                           accelerometer     [m/s^2]
     operator              command           [m/s, m/s, rad/s]
+                          (the policy and the speed target get it with the
+                          forward part governed: see govern_command)
     the controller itself previous joint-target offsets [rad]
 
 Every quantity is batched over robots, in the simulator's joint order (FL,
@@ -40,6 +42,7 @@ ONBOARD_OBSERVATIONS = {
     "contact_friction_hat": 1,
     "base_lin_vel_hat": 3,
     "clock_speed_obs": 1,
+    "governed_commands": 3,
 }
 GO2_URDF = Path(__file__).resolve().parents[3] / "resources/robots/go2/urdf/go2.urdf"
 
@@ -222,6 +225,25 @@ def carve(speed, budget, command, settings):
     return torch.where(carving, capped, turn), torch.where(carving, carved, budget)
 
 
+def govern_command(command, forward_speed, margin):
+    """The command [N, 3] with its forward part kept near the forward speed.
+
+    The policy cannot tell ice from grip while the robot stands, so a fast
+    command from rest makes it push harder than ice allows. The forward
+    command handed to the policy and to the speed target therefore leads
+    the estimated forward speed ``forward_speed`` [N] by at most ``margin``
+    [m/s], in the commanded direction. Slowing down is never limited.
+    ``margin`` None returns the command itself.
+    """
+    governed = command.clone()
+    if margin is None:
+        return governed
+    high = forward_speed.clamp(min=0.0) + margin
+    low = forward_speed.clamp(max=0.0) - margin
+    governed[:, 0] = torch.maximum(torch.minimum(command[:, 0], high), low)
+    return governed
+
+
 def advance_clock_speed(clock_speed, command, friction, dt, settings):
     """Move v_t [N, 1] one control step toward the forward command.
 
@@ -284,6 +306,8 @@ class Go2OscOnboard:
         self.push = torch.zeros(n, 4, device=self.device)
         self.load = torch.zeros(n, 4, device=self.device)
         self.command = torch.zeros(n, 3, device=self.device)
+        self.governed = torch.zeros(n, 3, device=self.device)
+        self.command_margin = settings["speed_target"].get("command_margin")
         self.history = None
 
     # -- sensors -> features ------------------------------------------------
@@ -358,12 +382,22 @@ class Go2OscOnboard:
             "contact_friction_hat": self.friction,
             "base_lin_vel_hat": self.velocity,
             "clock_speed_obs": self.clock_speed,
+            "governed_commands": self.governed,
         }
 
     # -- run ------------------------------------------------------------------
 
-    def reset(self, sensors, command, phase=None):
-        """Start from the robot's present state; returns the policy inputs."""
+    def _govern(self, command):
+        self.governed = govern_command(
+            command, self.velocity[:, 0], self.command_margin
+        )
+
+    def reset(self, sensors, command, phase=None, clock_speed=None):
+        """Start from the robot's present state; returns the policy inputs.
+
+        A robot starts at rest, so v_t starts at zero. ``clock_speed`` [N, 1]
+        is for a simulated episode that begins already moving.
+        """
         self.phase = (
             torch.full((self.num, 4), STANDING_PHASE, device=self.device)
             if phase is None
@@ -374,8 +408,13 @@ class Go2OscOnboard:
         length = self.frames * self.stride
         self.history = frame.unsqueeze(1).repeat(1, length, 1)
         self._estimate()
-        # v_t starts at the forward speed the robot has.
-        self.clock_speed = self.velocity[:, :1].clone()
+        # One repeated frame carries no motion, so v-hat cannot start v_t.
+        self.clock_speed = (
+            torch.zeros(self.num, 1, device=self.device)
+            if clock_speed is None
+            else clock_speed.clone()
+        )
+        self._govern(command)
         self._refresh_push(normal, stroke, command, restart=True)
         return self.observations()
 
@@ -391,9 +430,10 @@ class Go2OscOnboard:
         for _ in range(self.substeps):
             drift = omega - self.push * coupling * (self.phase.cos() + offset)
             self.phase = (self.phase + dt * 2 * math.pi * drift).remainder(2 * math.pi)
+        self._govern(command)
         self.clock_speed = advance_clock_speed(
             self.clock_speed,
-            command,
+            self.governed,
             self.friction[:, 0],
             self.dt,
             self.settings["speed_target"],

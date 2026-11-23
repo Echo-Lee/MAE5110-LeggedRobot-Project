@@ -164,7 +164,8 @@ def get_custom_obs_pieces():
         )
         for name in ONBOARD_OBSERVATIONS
     }
-    # The same deadbanded command drives both the oscillator and the actor.
+    # The deadbanded command as the operator gave it. The actor reads
+    # governed_commands, which the on-board module derives from it.
     pieces["commands"] = lambda main_controller, lowstate_msg: (
         main_controller.go2osc_command
     )

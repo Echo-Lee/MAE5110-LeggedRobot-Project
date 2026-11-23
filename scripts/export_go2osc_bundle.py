@@ -7,8 +7,9 @@ Run on the PC, right after training (it builds the training environment):
 
 Writes logs/policies/<name>/:
 
-    policy.pt            the actor (TorchScript), its outputs clamped so
-                         that no joint target reaches a joint limit
+    policy.pt            the actor (TorchScript), its outputs clamped as
+                         in training (the action limit, and the joint
+                         limits when the task sets joint_target_margin)
     estimator.pt         the state estimator (TorchScript)
     go2osc_onboard.json  oscillator, speed-target and estimator settings
     deploy_meta.json     the staff runner's bundle description
@@ -44,8 +45,9 @@ class ClampedActor(torch.nn.Module):
     """The actor with its outputs held inside the joint-target bounds.
 
     The runner multiplies the output by the action scale and adds the
-    default posture, so bounds in action units keep every joint target the
-    training margin inside the joint limits, as the simulator's clamp did.
+    default posture, so bounds in action units reproduce the simulator's
+    clamp: the action limit, and the joint limits less the margin when the
+    task sets control.joint_target_margin.
     """
 
     def __init__(self, actor, low, high):
@@ -119,6 +121,18 @@ def export(env, runner, out_dir, checkpoint, task=TASK, provenance=None):
     from go2_deploy.deploy_config import DeployConfig
     from go2_deploy.policy_bundle import export_bundle
 
+    share = getattr(env, "estimate_share", 1.0)
+    if share < 1.0:
+        raise ValueError(
+            f"{checkpoint} was trained with the estimates at a share of "
+            f"{share:.2f} (state_estimator.handover): the robot has only the "
+            "estimates, so export a checkpoint from after the hand-over"
+        )
+    if getattr(env, "joint_target_progress", 1.0) < 1.0:
+        raise ValueError(
+            f"{checkpoint} was trained before the joint-target clamp had "
+            "closed (control.joint_target_ramp): export a later checkpoint"
+        )
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     settings = onboard_settings(env)

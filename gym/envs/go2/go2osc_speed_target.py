@@ -60,6 +60,10 @@ class Go2OscSpeedTargetMixin:
         """Friction [N] the clock speed target assumes: the estimate."""
         return self.friction_estimate_obs[:, 0]
 
+    def _clock_target_command(self):
+        """Forward command [N] the speed target moves toward."""
+        return self.commands[:, 0]
+
     def _clock_start_speed(self):
         """Forward speed [N, 1] a fresh episode starts v_t at."""
         return self.base_lin_vel[:, :1]
@@ -81,7 +85,7 @@ class Go2OscSpeedTargetMixin:
             )
             return
         settings = self.cfg.reward_settings
-        target = self.commands[:, 0]
+        target = self._clock_target_command()
         speed = self.clock_speed_obs[:, 0]
         friction = self._clock_friction().clamp(
             min=self.cfg.osc.clock_speed_min_friction

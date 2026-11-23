@@ -4,16 +4,31 @@
 limited speed target, carved sliding stops, hardware variation) trained
 together with the state estimator of ``go2osc_push_glide_est``:
 
-    actor       IMU, joints, command, previous targets, oscillator phases,
-                the estimator's mu-hat and v-hat, and the speed target v_t
-    speed       v_t follows the command at rates set by mu-hat, and starts
-    target      an episode at the estimated forward speed
+    actor       IMU, joints, governed command, previous targets, oscillator
+                phases, the estimator's mu-hat and v-hat, and the speed
+                target v_t
+    command     the forward command the actor and v_t get leads v-hat by
+    governor    at most command_governor.margin: at rest mu-hat cannot
+                tell ice from grip, so a fast command is handed over as
+                the body speeds up
+    speed       v_t follows the governed command at rates set by mu-hat. An
+    target      episode starts it at the body's forward speed; a robot
+                starts at rest, so its controller starts v_t at zero
     clocks      driven by foot load from joint torques (F = -(J^T)^-1 tau)
                 and gated by foot velocity from joint speeds (J qdot),
                 both sampled once per control step, as the robot's 100 Hz
                 loop samples them
     estimator   trained on the true friction and velocity while PPO trains
                 the policy; saved in every checkpoint
+    joint       targets are clamped inside the joint limits (hard stops on
+    targets     the robot); control.joint_target_ramp closes that clamp
+                during training so that a policy trained without it adapts
+    hand-over   early in training the actor and the speed target read
+                stand-ins for the estimates (the simulated friction
+                estimate and the true body velocity with noise) while the
+                estimator learns beside them; state_estimator.handover
+                then blends them over to mu-hat and v-hat. On the robot
+                there are only the estimates.
 
 The critic and the rewards keep the simulator's true values. Everything the
 robot has to compute is in ``go2osc_onboard.py``, which shares this file's
@@ -25,6 +40,7 @@ import torch
 from gym.envs.go2.go2osc_est import Go2OscPushGlideEst
 from gym.envs.go2.go2osc_onboard import (
     GRAVITY_M_S2,
+    govern_command,
     leg_geometry,
     push_signal,
 )
@@ -47,11 +63,110 @@ class Go2OscPushGlideDeploy(Go2OscPushGlideEst):
                 f"{CONTACT_FORCE!r}, got {source!r}"
             )
         self._load_from_torque = source == JOINT_TORQUE
+        # Share of the estimates in what the actor and the speed target
+        # read: 1 on the robot and in any environment not told a training
+        # iteration; set_iteration moves it along state_estimator.handover.
+        self.estimate_share = 1.0
+        # How far the joint-target clamp has closed: 1 on the robot and in
+        # any environment not told a training iteration (the clamp is at
+        # control.joint_target_margin); control.joint_target_ramp moves it.
+        self.joint_target_progress = 1.0
+        self._check_handover()
+        self._check_joint_target_ramp()
         super()._init_buffers()
+        self._govern_commands()
         self._push_signal = torch.zeros(self.num_envs, 4, device=self.device)
         self._refresh_onboard_push_signal(
             torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
         )
+
+    # ── Hand-over from the simulator's stand-ins to the estimates ──────────
+
+    def _handover(self):
+        return getattr(self.cfg.state_estimator, "handover", None)
+
+    def _check_handover(self):
+        handover = self._handover()
+        if handover is None:
+            return
+        if not 0 <= handover.start <= handover.end:
+            raise ValueError(
+                "state_estimator.handover needs 0 <= start <= end, got "
+                f"{handover.start} and {handover.end}"
+            )
+
+    def set_iteration(self, iteration):
+        """Runner hook: the training iteration moves the task's schedules.
+
+        The joint-target clamp closes over control.joint_target_ramp, then
+        the estimates' share rises over state_estimator.handover: each 0
+        until its start, 1 from its end, linear between. A loaded
+        checkpoint is therefore evaluated as it was trained.
+        """
+        self.joint_target_progress = _progress(self._joint_target_ramp(), iteration)
+        self.estimate_share = _progress(self._handover(), iteration)
+        stage = (
+            int(4.0 * self.joint_target_progress),
+            int(4.0 * self.estimate_share),
+        )
+        if stage != getattr(self, "_stage_reported", stage):
+            margin = self._joint_target_margin()
+            clamp = "none" if margin is None else f"{margin:+.2f} rad inside"
+            print(
+                f"[go2osc schedule] iteration {iteration}: joint targets kept "
+                f"{clamp} the limits; the estimates' share is "
+                f"{self.estimate_share:.2f}",
+                flush=True,
+            )
+        self._stage_reported = stage
+        if hasattr(self, "estimator"):
+            self._publish_estimate()
+
+    # ── Joint-target clamp that closes during training ─────────────────────
+
+    def _joint_target_ramp(self):
+        return getattr(self.cfg.control, "joint_target_ramp", None)
+
+    def _check_joint_target_ramp(self):
+        ramp = self._joint_target_ramp()
+        if ramp is None:
+            return
+        if not 0 <= ramp.start <= ramp.end or ramp.slack < 0.0:
+            raise ValueError(
+                "control.joint_target_ramp needs 0 <= start <= end and "
+                f"slack >= 0, got {ramp.start}, {ramp.end} and {ramp.slack}"
+            )
+
+    def _joint_target_margin(self):
+        """The clamp's margin now: from `slack` beyond the limits to the
+        configured margin inside them as joint_target_progress goes 0 to 1."""
+        margin = super()._joint_target_margin()
+        ramp = self._joint_target_ramp()
+        if margin is None or ramp is None:
+            return margin
+        return margin - (1.0 - self.joint_target_progress) * (ramp.slack + margin)
+
+    def _publish_estimate(self):
+        """mu-hat and v-hat, or their stand-ins while the estimator learns.
+
+        The stand-ins are what go2osc_push_glide_robust fed its actor: the
+        simulated friction estimate (lag, gain, noise) and the true body
+        velocity with uniform noise.
+        """
+        super()._publish_estimate()
+        share = self.estimate_share
+        if share >= 1.0:
+            return
+        noise = self._handover().velocity_noise
+        velocity = self.base_lin_vel + noise * (
+            2.0 * torch.rand_like(self.base_lin_vel) - 1.0
+        )
+        self.contact_friction_hat = torch.lerp(
+            self.friction_estimate_obs.clamp(*FRICTION_CLIP),
+            self.contact_friction_hat,
+            share,
+        )
+        self.base_lin_vel_hat = torch.lerp(velocity, self.base_lin_vel_hat, share)
 
     # ── Speed target from the estimates ────────────────────────────────────
 
@@ -63,10 +178,34 @@ class Go2OscPushGlideDeploy(Go2OscPushGlideEst):
             return super()._clock_friction()
         return self.contact_friction_hat[:, 0]
 
-    def _clock_start_speed(self):
-        if not self._estimates_ready():
-            return super()._clock_start_speed()
-        return self.base_lin_vel_hat[:, :1]
+    # v_t starts an episode at the body's true forward speed (the parent's
+    # _clock_start_speed), not at v-hat: at a reset the estimator's history
+    # is one repeated frame, which carries no motion. The robot's controller
+    # starts at rest with v_t = 0 (go2osc_onboard.Go2OscOnboard.reset).
+
+    # ── Command governor ───────────────────────────────────────────────────
+
+    def _command_margin(self):
+        governor = getattr(self.cfg, "command_governor", None)
+        return None if governor is None else governor.margin
+
+    def _govern_commands(self):
+        """governed_commands [N, 3]: what the actor and the speed target get."""
+        self.governed_commands = govern_command(
+            self.commands, self.base_lin_vel_hat[:, 0], self._command_margin()
+        )
+
+    def _clock_target_command(self):
+        if not hasattr(self, "governed_commands"):
+            return super()._clock_target_command()
+        return self.governed_commands[:, 0]
+
+    def _advance_clock_speed(self, reset_mask=None):
+        # Governed from the command now and the v-hat of the step before,
+        # the order go2osc_onboard.Go2OscOnboard.step keeps.
+        if self._estimates_ready():
+            self._govern_commands()
+        super()._advance_clock_speed(reset_mask)
 
     def _estimator_targets(self):
         """True labels: the mean friction under the feet, and body velocity.
@@ -221,10 +360,20 @@ class Go2OscPushGlideDeploy(Go2OscPushGlideEst):
         super()._reset_idx(reset_mask)
         if not hasattr(self, "estimator"):  # reset() also runs during __init__
             return
-        # The parent restarted v_t before the estimator saw the new episode.
+        # The parent governed the command before the estimator saw the new
+        # episode: govern it again from the fresh v-hat.
         self._advance_clock_speed(reset_mask)
         if hasattr(self, "_push_signal"):
             self._refresh_onboard_push_signal(reset_mask)
+
+
+def _progress(schedule, iteration):
+    """0 until schedule.start, 1 from schedule.end, linear between; 1 without one."""
+    if schedule is None or iteration >= schedule.end:
+        return 1.0
+    if iteration <= schedule.start:
+        return 0.0
+    return (iteration - schedule.start) / (schedule.end - schedule.start)
 
 
 def onboard_settings(env):
@@ -290,6 +439,8 @@ def onboard_settings(env):
             "carve_min_brake": float(
                 getattr(rewards, "speed_reference_carve_min_brake", 0.0)
             ),
+            # Lead [m/s] of the governed forward command over v-hat; None: off.
+            "command_margin": env._command_margin(),
         },
         "estimator": {
             "features": features,

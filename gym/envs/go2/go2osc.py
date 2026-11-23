@@ -8,7 +8,14 @@ import torch
 from gym import GYM_ROOT_DIR
 from gym.envs.base.domain_randomization import contact_friction_range
 from gym.envs.go2.go2 import Go2
-from gym.envs.go2.go2osc_joint_targets import joint_target_bounds, keep_joint_targets
+from gym.envs.go2.go2osc_joint_targets import (
+    joint_limit_margin_reward,
+    joint_target_bounds,
+    keep_joint_targets,
+    limit_joint_targets,
+    standing_saturation_reward,
+    target_saturation_reward,
+)
 from gym.envs.go2.go2osc_speed_target import Go2OscSpeedTargetMixin
 from gym.utils.sampling import masked_update
 from gym.utils.torch_quat import quat_apply
@@ -1445,16 +1452,19 @@ class Go2OscPushGlide(Go2OscSpeedTargetMixin, Go2OscDirectional):
         super()._pre_decimation_step()
 
     def _limit_joint_targets(self):
-        """Bound the commanded joint offsets, in units of the policy action.
+        limit_joint_targets(self)
 
-        The policy sees its previous target, so an unbounded target can feed on
-        itself once the robot leaves the states it was trained on.
-        """
-        limit = getattr(self.cfg.control, "action_limit", None)
-        if limit is not None:
-            bound = limit * self.scales["dof_pos_target"]
-            self.dof_pos_target.clamp_(-bound, bound)
-        self._keep_targets_inside_joint_limits()
+    def _reward_target_saturation(self):
+        return target_saturation_reward(self)
+
+    def _reward_standing_saturation(self):
+        return standing_saturation_reward(self)
+
+    def _reward_joint_limit_margin(self):
+        return joint_limit_margin_reward(self)
+
+    def _joint_target_margin(self):
+        return getattr(self.cfg.control, "joint_target_margin", None)
 
     def _joint_target_bounds(self):
         return joint_target_bounds(self)

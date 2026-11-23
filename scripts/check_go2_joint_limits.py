@@ -6,12 +6,17 @@ This rolls a checkpoint out on several frictions and commands (walking,
 turning, backward, standing and sliding stops) and compares every joint's
 measured angle and commanded target with the URDF limits.
 
+Both are checked. A target beyond a limit drives an unloaded joint into its
+stop (tau = kp (target - angle)), so a policy for the robot keeps its
+targets inside as well.
+
     uv run scripts/check_go2_joint_limits.py --task go2osc_push_glide_deploy \
         --checkpoint logs/go2osc_push_glide_deploy/<run>/model_4000.pt
 
-Exit code 0 when no joint angle passes a hard limit and no commanded target
-passes the limits less ``--margin`` [rad]; 1 otherwise. ``--json`` writes
-the table.
+Exit code 0 when no joint angle comes within ``--angle_margin`` [rad] of a
+hard limit and no commanded target passes the limits less ``--margin``
+[rad]; 1 otherwise. ``--angles_only`` leaves the targets out of the result.
+``--json`` writes the table.
 """
 
 import argparse
@@ -59,6 +64,14 @@ def parse_arguments():
     parser.add_argument("--duration", type=float, default=8.0, help="s per rollout")
     parser.add_argument("--stop_time", type=float, default=5.0)
     parser.add_argument("--stop_speed", type=float, default=2.0)
+    parser.add_argument(
+        "--angle_margin", type=float, default=0.0, help="rad kept from a limit"
+    )
+    parser.add_argument(
+        "--angles_only",
+        action="store_true",
+        help="report the commanded targets without failing on them",
+    )
     parser.add_argument("--margin", type=float, default=0.0, help="rad for targets")
     parser.add_argument(
         "--variation",
@@ -195,8 +208,11 @@ def main():
         target = (target_low[:, index].min().item(), target_high[:, index].max().item())
         share = (past[:, index].sum() / (steps * env.num_envs)).item()
         push = (pressed[:, index].sum() / (steps * env.num_envs)).item()
-        angle_bad = angle[0] < low or angle[1] > high
-        target_bad = (
+        angle_bad = (
+            angle[0] < low + arguments.angle_margin
+            or angle[1] > high - arguments.angle_margin
+        )
+        target_bad = not arguments.angles_only and (
             target[0] < low + arguments.margin or target[1] > high - arguments.margin
         )
         failed |= angle_bad or target_bad
@@ -213,6 +229,7 @@ def main():
                 "joint": name,
                 "limits": [low, high],
                 "angle": list(angle),
+                "closest_to_a_limit": min(angle[0] - low, high - angle[1]),
                 "target": list(target),
                 "time_angle_past_stop": share,
                 "time_target_past_stop": push,
@@ -228,6 +245,8 @@ def main():
                     "upright": int(alive.sum()),
                     "rollouts": env.num_envs,
                     "inside": not failed,
+                    "angle_margin": arguments.angle_margin,
+                    "targets_checked": not arguments.angles_only,
                     "joints": rows,
                 },
                 indent=2,

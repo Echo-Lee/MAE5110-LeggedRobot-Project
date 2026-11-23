@@ -11,10 +11,9 @@ Key choice (2026-07-23) — the constraint is what the viewers reserve:
   original WASD scheme had to go.  It also only accepts ALPHANUMERIC keys
   as strings; special keys must use its UserKey enum.
 * MuJoCo's viewer binds nearly every letter to a visualisation toggle
-  (I=inertia, J=joint, K=skybox, L=additive, M=CoM, N=constraint, …), so
-  no letter is truly free there; a teleop press may also flip a vis flag.
-  Launching the viewer with the side panels hidden disables those
-  shortcuts if it ever becomes annoying.
+  (I=inertia, J=joint, K=skybox, L=additive, M=CoM, N=constraint, …).
+  The MuJoCo adapter preserves the viewer settings for keys reserved by
+  teleoperation so command changes do not toggle diagnostic displays.
 
 That leaves the IJKL diamond, with yaw dropped onto N/M because the
 natural U/O pair collides with vsim's step toggle:
@@ -82,7 +81,11 @@ class TeleopCommands:
         env.commands[:] = 0.0
         env.commands[:, 0] = 1.0  # seed forward velocity so motion is visible
         if hasattr(env.cfg, "commands"):
-            env.cfg.commands.resampling_time = env.max_episode_length_s + 1
+            # Keep sampling outside play.py's 500 s playback horizon, without
+            # shortening an already longer command-hold period.
+            env.cfg.commands.resampling_time = max(
+                env.cfg.commands.resampling_time, 9999.0
+            )
 
     def apply(self, action: str) -> None:
         """Apply one discrete press of ``action`` (see BINDINGS)."""
@@ -102,8 +105,10 @@ class TeleopCommands:
         elif action == "yaw_right":
             c[:, 2] = torch.clamp(c[:, 2] - self.increment_yaw, min=-self.max_vel_yaw)
         elif action == "reset":
+            command = c.clone()
             self.env.timed_out[:] = True
             self.env.reset()
+            self.env.commands.copy_(command)
         else:
             raise ValueError(f"unknown teleop action {action!r}")
 

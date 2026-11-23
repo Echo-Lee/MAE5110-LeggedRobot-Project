@@ -27,6 +27,7 @@ from gym.envs.go2.go2osc_onboard import (
     Go2OscOnboard,
     advance_clock_speed,
     clock_schedule,
+    govern_command,
     leg_geometry,
     leg_kinematics,
     push_signal,
@@ -188,7 +189,7 @@ def test_actor_and_estimator_read_nothing_the_robot_lacks():
     assert actor == [
         "base_ang_vel",
         "projected_gravity",
-        "commands",
+        "governed_commands",
         "dof_pos_obs",
         "dof_vel",
         "dof_pos_target",
@@ -223,7 +224,7 @@ def test_joint_targets_stay_a_margin_inside_the_limits(env):
     limits = env.dof_pos_limits.index_select(0, actuated)
     default = env.default_dof_pos.index_select(1, actuated)
     margin = env.cfg.control.joint_target_margin
-    assert margin == pytest.approx(0.05)
+    assert margin == pytest.approx(0.2)
     for sign in (1.0, -1.0):
         env.dof_pos_target[:] = sign * 100.0
         env._pre_decimation_step()
@@ -256,6 +257,58 @@ def test_without_a_margin_targets_are_not_limited_by_the_joints():
         backend.close()
 
 
+def test_joint_target_clamp_closes_over_the_training_ramp(env):
+    ramp = env.cfg.control.joint_target_ramp
+    margin = env.cfg.control.joint_target_margin
+    assert 0 < ramp.start < ramp.end <= env.cfg.state_estimator.handover.start
+    actuated = env.actuated_dof_indices
+    limits = env.dof_pos_limits.index_select(0, actuated)
+    default = env.default_dof_pos.index_select(1, actuated)
+    middle = (ramp.start + ramp.end) // 2
+    share = (middle - ramp.start) / (ramp.end - ramp.start)
+    for iteration, expected in (
+        (0, -ramp.slack),
+        (ramp.start, -ramp.slack),
+        (middle, margin - (1.0 - share) * (ramp.slack + margin)),
+        (ramp.end, margin),
+        (ramp.end + 1000, margin),
+    ):
+        env.set_iteration(iteration)
+        assert env._joint_target_margin() == pytest.approx(expected)
+        env.dof_pos_target[:] = 100.0
+        env._pre_decimation_step()
+        # The calf's upper stop binds before the action limit does.
+        calf = default[0, 2] + env.dof_pos_target[0, 2]
+        assert calf.item() == pytest.approx(limits[2, 1].item() - expected, abs=1e-5)
+
+
+def test_a_fresh_environment_has_the_closed_clamp(env):
+    # The robot's case: the exported policy carries this clamp.
+    assert env.joint_target_progress == 1.0
+    assert env._joint_target_margin() == pytest.approx(0.2)
+
+
+def test_without_a_ramp_the_clamp_is_closed_from_the_start():
+    def edit(cfg):
+        cfg.control.joint_target_ramp = None
+
+    env, _, backend = _make(edit)
+    try:
+        env.set_iteration(0)
+        assert env._joint_target_margin() == pytest.approx(0.2)
+    finally:
+        backend.close()
+
+
+def test_rejects_a_joint_target_ramp_that_ends_before_it_starts():
+    def edit(cfg):
+        cfg.control.joint_target_ramp.start = 10
+        cfg.control.joint_target_ramp.end = 5
+
+    with pytest.raises(ValueError, match="joint_target_ramp"):
+        _make(edit)
+
+
 def test_rejects_a_negative_joint_target_margin():
     def edit(cfg):
         cfg.control.joint_target_margin = -0.1
@@ -264,10 +317,28 @@ def test_rejects_a_negative_joint_target_margin():
         _make(edit)
 
 
-def test_joint_limit_penalties_are_on():
+def test_joint_angles_near_a_limit_are_penalised(env):
     weights = configs.Go2OscPushGlideDeployRunnerCfg.critic.reward.weights
-    assert weights.dof_pos_target_limits > 0.0
-    assert weights.dof_pos_limits > 0.0
+    assert weights.joint_limit_margin > 0.0
+    margin = env.cfg.reward_settings.joint_limit_margin
+    assert margin == pytest.approx(0.1)
+    actuated = env.actuated_dof_indices
+    limits = env.dof_pos_limits.index_select(0, actuated)
+    calf = actuated[2]
+    # The default posture is clear of every limit.
+    env.dof_pos[:] = env.default_dof_pos
+    assert env._reward_joint_limit_margin().abs().max() == 0.0
+    # Free until the margin, 1/2 halfway in, 1 on the stop, 2 a margin beyond.
+    for offset, cost in ((-1.5, 0.0), (-0.5, 0.5), (0.0, 1.0), (1.0, 2.0)):
+        env.dof_pos[:] = env.default_dof_pos
+        env.dof_pos[0, calf] = limits[2, 1] + offset * margin
+        reward = env._reward_joint_limit_margin()
+        assert reward[0].item() == pytest.approx(-cost, abs=1e-5)
+        assert reward[1:].abs().max() == 0.0
+    # The lower limit counts the same way.
+    env.dof_pos[:] = env.default_dof_pos
+    env.dof_pos[0, calf] = limits[2, 0]
+    assert env._reward_joint_limit_margin()[0].item() == pytest.approx(-1.0, abs=1e-5)
 
 
 # ── Speed target and estimator ─────────────────────────────────────────────
@@ -286,10 +357,49 @@ def test_speed_target_uses_the_estimated_friction(env):
     torch.testing.assert_close(env.clock_speed_obs[:, 0], expected)
 
 
-def test_an_episode_starts_the_speed_target_at_the_estimated_speed(env):
+def test_an_episode_starts_the_speed_target_at_the_body_speed(env):
+    # Not at v-hat: at a reset the estimator has seen one frame.
     everyone = torch.ones(NUM_ENVS, dtype=torch.bool)
     env._reset_idx(everyone)
-    torch.testing.assert_close(env.clock_speed_obs, env.base_lin_vel_hat[:, :1])
+    torch.testing.assert_close(env.clock_speed_obs, env.base_lin_vel[:, :1])
+
+
+def test_govern_command_limits_the_lead_over_the_forward_speed():
+    command = torch.tensor(
+        [[2.0, 0.3, 0.5], [-1.0, 0.0, 0.0], [0.0, 0.0, 0.5], [1.0, 0.0, 0.0]]
+    )
+    speed = torch.tensor([0.0, 0.0, 1.8, 1.8])
+    governed = govern_command(command, speed, 0.5)
+    # From rest a fast command is handed over a margin at a time, either way.
+    # Stopping and slowing down are never limited.
+    assert governed[:, 0].tolist() == pytest.approx([0.5, -0.5, 0.0, 1.0])
+    torch.testing.assert_close(governed[:, 1:], command[:, 1:])
+    # Moving against the command, the lead counts from zero.
+    reverse = govern_command(command[:2], torch.tensor([-1.0, 1.0]), 0.5)
+    assert reverse[:, 0].tolist() == pytest.approx([0.5, -0.5])
+    torch.testing.assert_close(govern_command(command, speed, None), command)
+
+
+def test_actor_and_speed_target_get_the_governed_command(env):
+    margin = env.cfg.command_governor.margin
+    assert margin > env.cfg.osc.stop_threshold
+    env.commands[:] = torch.tensor([2.0, 0.0, 0.0])
+    env.base_lin_vel_hat = torch.zeros(NUM_ENVS, 3)
+    env.contact_friction_hat = torch.ones(NUM_ENVS, 1)
+    env.clock_speed_obs.zero_()
+    for _ in range(100):
+        env._advance_clock_speed()
+    assert env.governed_commands[:, 0].tolist() == pytest.approx([margin] * NUM_ENVS)
+    # v_t stops at the governed command, not at the command.
+    assert env.clock_speed_obs[:, 0].tolist() == pytest.approx([margin] * NUM_ENVS)
+    column = env.get_states(["governed_commands"])
+    assert column[:, 0].tolist() == pytest.approx(
+        [margin / env.scales["governed_commands"][0].item()] * NUM_ENVS
+    )
+    # The estimator keeps the command as given: a governed input would feed
+    # v-hat back into itself.
+    assert "commands" in env.estimator_features
+    assert "governed_commands" not in env.estimator_features
 
 
 def test_estimator_learns_the_mean_friction_under_the_feet(env):
@@ -462,7 +572,12 @@ def test_onboard_reset_matches_an_environment_reset(env):
     env.commands[:] = _command_schedule(0)
     env._reset_idx(everyone)
     onboard = _onboard(env)
-    observations = onboard.reset(_sensors(env), env.commands, phase=env.oscillators)
+    observations = onboard.reset(
+        _sensors(env),
+        env.commands,
+        phase=env.oscillators,
+        clock_speed=env.clock_speed_obs,
+    )
     for name in ONBOARD_OBSERVATIONS:
         torch.testing.assert_close(
             observations[name], getattr(env, name), atol=1e-5, rtol=0
@@ -474,9 +589,20 @@ def test_onboard_follows_the_environment_step_by_step(env):
     everyone = torch.ones(NUM_ENVS, dtype=torch.bool)
     env.commands[:] = _command_schedule(0)
     env._reset_idx(everyone)
+    # Begin on the moving clocks, whatever friction the untrained estimator
+    # reports: an episode that starts already at speed.
+    env.clock_speed_obs.fill_(0.6)
+    env._refresh_onboard_push_signal(everyone)
     onboard = _onboard(env)
-    onboard.reset(_sensors(env), env.commands, phase=env.oscillators)
+    onboard.reset(
+        _sensors(env),
+        env.commands,
+        phase=env.oscillators,
+        clock_speed=env.clock_speed_obs,
+    )
     worst = {"phase": 0.0, "speed": 0.0, "friction": 0.0, "velocity": 0.0, "push": 0.0}
+    worst["command"] = 0.0
+    fastest = {"speed": 0.0}
 
     def compare(step, command):
         observations = onboard.step(_sensors(env), command)
@@ -499,16 +625,22 @@ def test_onboard_follows_the_environment_step_by_step(env):
             gap(observations["base_lin_vel_hat"], env.base_lin_vel_hat),
         )
         worst["push"] = max(worst["push"], gap(onboard.push, env._push_signal))
+        worst["command"] = max(
+            worst["command"],
+            gap(observations["governed_commands"], env.governed_commands),
+        )
+        fastest["speed"] = max(fastest["speed"], env.clock_speed_obs.abs().max().item())
 
     compared = _drive(env, 160, compare)
     assert compared >= 120, f"only {compared} steps before a fall"
+    assert worst["command"] < 1e-3, worst
     assert worst["phase"] < 1e-3, worst
     assert worst["speed"] < 1e-4, worst
     assert worst["friction"] < 1e-3, worst
     assert worst["velocity"] < 1e-3, worst
     assert worst["push"] < 1e-3, worst
     # The run exercised the moving clocks and a speed target that moved.
-    assert env.clock_speed_obs.abs().max() > 0.1
+    assert fastest["speed"] > 0.1
 
 
 def test_onboard_starts_on_the_standing_clocks():
@@ -543,6 +675,7 @@ def test_onboard_starts_on_the_standing_clocks():
     }
     command = torch.zeros(1, 3)
     onboard.reset(sensors, command)
+    assert onboard.clock_speed.abs().max() == 0.0
     for _ in range(300):
         onboard.step(sensors, command)
     # Standing with loaded feet, the clocks settle where cos(phase) = 0 on
@@ -663,6 +796,8 @@ def test_deploy_file_reproduces_the_training_observation(bundle, monkeypatch, ca
     env.estimator.reset(everyone, env._estimator_inputs())
     env._publish_estimate()
     env._advance_clock_speed(everyone)
+    # The robot's controller starts at rest: v_t = 0.
+    env.clock_speed_obs.zero_()
     env._refresh_onboard_push_signal(everyone)
 
     limits = cfg.command_limits
@@ -768,3 +903,208 @@ def test_deploy_file_needs_a_bundle_and_refuses_action_smoothing(bundle, monkeyp
     (directory / "estimator.pt").write_bytes(b"not the estimator")
     with pytest.raises(ValueError, match="does not match"):
         module.load_onboard(directory)
+
+
+# ── A clamped target must stay learnable ───────────────────────────────────
+
+
+def test_target_excess_records_what_the_clamp_removed(env):
+    scale = torch.as_tensor(env.scales["dof_pos_target"]).expand(12)
+    low, high = env._joint_target_bounds()
+    inside = 0.5 * (low[0] + high[0])
+    env.dof_pos_target[:] = inside
+    env._pre_decimation_step()
+    torch.testing.assert_close(env.dof_pos_target_excess, torch.zeros(NUM_ENVS, 12))
+    assert env._reward_target_saturation().abs().max() == 0.0
+    # Three action units beyond the calf's upper bound, on one robot.
+    env.dof_pos_target[:] = inside
+    env.dof_pos_target[0, 2] = high[0, 2] + 3.0 * scale[2]
+    env._pre_decimation_step()
+    assert env.dof_pos_target[0, 2].item() == pytest.approx(high[0, 2].item())
+    assert env.dof_pos_target_excess[0, 2].item() == pytest.approx(3.0, abs=1e-4)
+    reward = env._reward_target_saturation()
+    assert reward[0].item() == pytest.approx(-2.5, abs=1e-4)  # |e| - 1/2
+    assert reward[1:].abs().max() == 0.0
+
+
+def test_saturation_penalty_grows_with_the_distance_beyond_the_clamp(env):
+    scale = torch.as_tensor(env.scales["dof_pos_target"]).expand(12)
+    _, high = env._joint_target_bounds()
+    costs = []
+    for beyond in (0.5, 2.0, 80.0):
+        env.dof_pos_target[:] = 0.0
+        env.dof_pos_target[:, 2] = high[0, 2] + beyond * scale[2]
+        env._pre_decimation_step()
+        costs.append(-env._reward_target_saturation()[0].item())
+    assert costs[0] == pytest.approx(0.125, abs=1e-4)  # e^2 / 2
+    assert costs[0] < costs[1] < costs[2]
+    # Without it every one of these outputs would cost the same: nothing.
+    assert costs[2] == pytest.approx(79.5, abs=1e-2)
+
+
+def test_deploy_task_penalises_saturated_targets():
+    weights = configs.Go2OscPushGlideDeployRunnerCfg.critic.reward.weights
+    assert weights.target_saturation == pytest.approx(1.0)
+    assert weights.standing_saturation == pytest.approx(4.0)
+
+
+def test_standing_saturation_counts_only_while_the_clocks_stand():
+    # No environment: only the excess and the standing mask enter.
+    standing = torch.tensor([[True], [True], [False], [False]])
+    robot = SimpleNamespace(
+        dof_pos_target_excess=torch.ones(4, 12),
+        _slow_command_mask=lambda: standing,
+    )
+    everywhere = Go2OscPushGlideDeploy._reward_target_saturation(robot)
+    stood = Go2OscPushGlideDeploy._reward_standing_saturation(robot)
+    assert (everywhere < 0).all()
+    torch.testing.assert_close(stood[:2], everywhere[:2])
+    assert stood[2:].abs().max() == 0.0
+
+
+# ── Hand-over from the simulator's stand-ins to the estimates ──────────────
+
+
+def test_a_fresh_environment_reads_only_the_estimates(env):
+    # The robot's case, and what every parity test above relies on.
+    assert env.estimate_share == 1.0
+
+
+def test_handover_schedule_follows_the_training_iteration(env):
+    handover = env.cfg.state_estimator.handover
+    assert 0 < handover.start < handover.end
+    middle = (handover.start + handover.end) // 2
+    for iteration, share in (
+        (0, 0.0),
+        (handover.start, 0.0),
+        (middle, (middle - handover.start) / (handover.end - handover.start)),
+        (handover.end, 1.0),
+        (handover.end + 1000, 1.0),
+    ):
+        env.set_iteration(iteration)
+        assert env.estimate_share == pytest.approx(share)
+
+
+def test_before_the_handover_the_actor_reads_the_stand_ins(env):
+    env.set_iteration(0)
+    noise = env.cfg.state_estimator.handover.velocity_noise
+    for _ in range(3):
+        env.step()
+    torch.testing.assert_close(
+        env.contact_friction_hat, env.friction_estimate_obs.clamp(0.02, 1.5)
+    )
+    error = (env.base_lin_vel_hat - env.base_lin_vel).abs()
+    assert error.max() <= noise + 1e-6
+    assert error.max() > 0.0
+    # The speed target follows the same friction.
+    torch.testing.assert_close(env._clock_friction(), env.contact_friction_hat[:, 0])
+    # The estimator itself is untouched: it still publishes its own output.
+    assert not torch.equal(env.estimator.v_hat, env.base_lin_vel_hat)
+
+
+def test_halfway_through_the_handover_the_inputs_are_blended(env):
+    handover = env.cfg.state_estimator.handover
+    env.set_iteration(0)
+    env.step()
+    env.friction_estimate_obs.fill_(0.2)
+    env.estimator.mu_hat = torch.full((NUM_ENVS,), 0.6)
+    env.set_iteration((handover.start + handover.end) // 2)
+    torch.testing.assert_close(env.contact_friction_hat, torch.full((NUM_ENVS, 1), 0.4))
+    env.set_iteration(handover.end)
+    torch.testing.assert_close(env.contact_friction_hat, torch.full((NUM_ENVS, 1), 0.6))
+    torch.testing.assert_close(env.base_lin_vel_hat, env.estimator.v_hat)
+
+
+def test_without_a_handover_the_estimates_are_read_from_the_start():
+    def edit(cfg):
+        cfg.state_estimator.handover = None
+
+    env, _, backend = _make(edit)
+    try:
+        env.set_iteration(0)
+        assert env.estimate_share == 1.0
+    finally:
+        backend.close()
+
+
+def test_rejects_a_handover_that_ends_before_it_starts():
+    def edit(cfg):
+        cfg.state_estimator.handover.start = 10
+        cfg.state_estimator.handover.end = 5
+
+    with pytest.raises(ValueError, match="handover"):
+        _make(edit)
+
+
+def test_runner_tells_the_environment_the_checkpoint_iteration(tmp_path):
+    env, runner_cfg, backend = _make()
+    try:
+        runner_cfg.runner.device = "cpu"
+        runner_cfg.logging.enable_local_saving = False
+        runner_cfg.log_dir = str(tmp_path)
+        runner = task_registry.make_alg_runner(env, runner_cfg)
+        handover = env.cfg.state_estimator.handover
+        for iteration, share in ((0, 0.0), (handover.end, 1.0)):
+            runner.it = iteration
+            runner.save()
+            env.estimate_share = 0.5
+            runner.load(str(tmp_path / f"model_{iteration}.pt"))
+            assert env.estimate_share == share
+    finally:
+        backend.close()
+
+
+def test_export_refuses_a_checkpoint_from_before_the_handover(bundle, tmp_path):
+    from scripts.export_go2osc_bundle import export
+
+    env, runner, _ = bundle
+    env.set_iteration(0)
+    with pytest.raises(ValueError, match="hand-over"):
+        export(env, runner, tmp_path / "early", tmp_path / "model_0.pt")
+
+
+def test_export_refuses_a_checkpoint_from_before_the_clamp_closed(bundle, tmp_path):
+    from scripts.export_go2osc_bundle import export
+
+    env, runner, _ = bundle
+    env.estimate_share = 1.0
+    env.joint_target_progress = 0.5
+    with pytest.raises(ValueError, match="clamp"):
+        export(env, runner, tmp_path / "early", tmp_path / "model_0.pt")
+
+
+def test_robust_policy_inputs_map_onto_the_deploy_actor(env):
+    from scripts.convert_go2osc_robust_to_deploy import (
+        convert,
+        input_columns,
+    )
+
+    source = [
+        "base_ang_vel",
+        "projected_gravity",
+        "commands",
+        "dof_pos_obs",
+        "dof_vel",
+        "dof_pos_target",
+        "oscillator_obs",
+        "foot_traction_obs",
+        "friction_estimate_obs",
+        "base_lin_vel",
+        "clock_speed_obs",
+    ]
+    target = list(configs.Go2OscPushGlideDeployRunnerCfg.actor.obs)
+    columns, width, dropped = input_columns(env, source, target)
+    assert (width, len(columns)) == (66, 58)
+    assert dropped == ["foot_traction_obs"]
+    # The estimates take the columns of the signals they replace.
+    assert columns[-5:].tolist() == [61, 62, 63, 64, 65]
+    assert columns[:53].tolist() == list(range(53))
+    weight = torch.arange(66.0).repeat(3, 1)
+    state = {
+        "actor_state_dict": {"NN.0.weight": weight, "NN.2.bias": torch.zeros(66, 4)},
+        "optimizer_state_dict": {"state": {0: {"exp_avg": weight.clone()}}, "x": 1},
+    }
+    actor, optimizer = convert(state, columns, width)
+    torch.testing.assert_close(actor["NN.0.weight"][0], columns.float())
+    assert actor["NN.2.bias"].shape == (66, 4)  # not laid out over the inputs
+    assert optimizer["state"][0]["exp_avg"].shape == (3, 58)
