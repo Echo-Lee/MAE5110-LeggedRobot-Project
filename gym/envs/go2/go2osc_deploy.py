@@ -31,14 +31,14 @@ together with the state estimator of ``go2osc_push_glide_est``:
                 there are only the estimates.
 
 The critic and the rewards keep the simulator's true values. Everything the
-robot has to compute is in ``go2osc_onboard.py``, which shares this file's
-arithmetic.
+robot has to compute is owned by the standalone custom configuration in
+``go2_deploy/custom_implementation/go2osc_push_glide.py``.
 """
 
 import torch
 
 from gym.envs.go2.go2osc_est import Go2OscPushGlideEst
-from gym.envs.go2.go2osc_onboard import (
+from go2_deploy.custom_implementation.go2osc_push_glide import (
     GRAVITY_M_S2,
     govern_command,
     leg_geometry,

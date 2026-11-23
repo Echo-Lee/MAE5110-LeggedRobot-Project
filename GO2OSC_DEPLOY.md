@@ -99,7 +99,7 @@ leads the estimated speed:
     governed = clamp(command, min(v̂, 0) − 0.5, max(v̂, 0) + 0.5)   [m/s]
 
 The estimator, the reward reference and the critic keep the raw command.
-`go2osc_onboard.py` applies the same rule on the robot
+The standalone custom configuration applies the same rule on the robot
 (`speed_target.command_margin` in `go2osc_onboard.json`).
 
 ### Numerical guards
@@ -204,8 +204,12 @@ policy was trained with:
 The wireless runner discovers `Go2OscPushGlide`, a `CustomConfig` subclass,
 by its `task_name = "go2osc_push_glide_deploy"`. Its instance supplies the
 custom buffers and observation callbacks. The class sets 100 Hz, kp 20,
-kd 0.5 and no smoothing; bundle metadata supplies the saved scales and
-posture. Use `--task go2trot` for the staff's trot template.
+kd 0.5 and no smoothing. Its observation computations, state buffers,
+ordered input names, dimensions, scales and posture are defined directly
+in `go2_deploy/custom_implementation/go2osc_push_glide.py`; this file has no
+environment or simulator imports. Training imports this observation
+declaration and scaling class. Bundle metadata must match the declaration
+and is checked before inference. Use `--task go2trot` for the staff template.
 
 For policy review, provide `logs/<task>/<run>/model_<iteration>.pt` and the
 same run's `files/gym/envs/go2/` source snapshot. Preserve the original
@@ -242,8 +246,8 @@ checked with a stand-in for the SDK only.
 | File | Role |
 |---|---|
 | `gym/envs/go2/go2osc_deploy.py`, `go2osc_deploy_config.py` | The task |
-| `gym/envs/go2/go2osc_onboard.py` | What the robot computes: leg kinematics, foot load, oscillators, speed target, estimator history |
-| `go2_deploy/custom_implementation/go2osc_push_glide.py` | Staff-runner adapter: LowState → those computations → observation pieces |
+| `go2_deploy/custom_implementation/go2osc_push_glide.py` | Observation definitions, leg kinematics, foot load, oscillators, speed target, estimator buffers and staff-runner callbacks; standalone PyTorch code |
+| `gym/envs/go2/go2osc_onboard.py` | Compatibility imports of the custom configuration's functions |
 | `scripts/export_go2osc_bundle.py` | Checkpoint → bundle |
 | `scripts/check_go2_joint_limits.py` | Joint-limit check for any Go2 task |
 | `scripts/check_go2osc_signals.py` | Read-only signal check on the robot |

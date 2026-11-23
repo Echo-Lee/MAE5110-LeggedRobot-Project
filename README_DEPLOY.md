@@ -57,6 +57,11 @@ Implement a `CustomConfig` subclass in `go2_deploy/custom_implementation/`,
 using `go2trot_base.py` as an example. Give it a unique `task_name`, ordered
 observations, scales, custom observation sizes, default posture and the three
 buffer/observation callbacks. The runner discovers the class by task name.
+Write the deployed computations and buffer definitions in that custom file;
+do not import them from a training environment. The Go2osc implementation
+owns its observation declaration and scales, which training also imports.
+Bundle loading checks the recorded layout, scales and posture against the
+selected custom configuration.
 
 Policy-specific control frequency, kp, kd and action smoothing can override
 the defaults on the subclass. Bundle metadata records these settings together

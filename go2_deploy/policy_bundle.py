@@ -107,10 +107,29 @@ def config_from_meta(meta, custom_impl=None):
             f"but custom_impl is for '{custom_impl.task_name}'"
         )
     cfg = DeployConfig(custom_impl)
+    # The custom configuration defines observations; a bundle records and
+    # verifies that contract rather than silently replacing it.
+    if list(meta["obs_vector"]) != cfg.obs_vector:
+        raise ValueError("bundle observation order differs from CustomConfig")
+    for name in cfg.obs_vector:
+        if meta["obs_sizes"][name] != cfg.obs_sizes[name]:
+            raise ValueError(
+                f"bundle observation size for {name} differs from CustomConfig"
+            )
+    for name in cfg.obs_vector + [ACTION_SCALE_KEY]:
+        expected = torch.as_tensor(
+            getattr(cfg.DeployScaling, name, 1.0), dtype=torch.float
+        )
+        recorded = torch.as_tensor(meta["scaling"][name], dtype=torch.float)
+        if not torch.equal(expected, recorded):
+            raise ValueError(
+                f"bundle observation scale for {name} differs from CustomConfig"
+            )
+    if not torch.equal(
+        cfg.default_dof_pos, torch.tensor(meta["default_dof_pos"], dtype=torch.float)
+    ):
+        raise ValueError("bundle default posture differs from CustomConfig")
     cfg.task_name = meta["task_name"]
-    cfg.obs_vector = list(meta["obs_vector"])
-    cfg.obs_sizes = dict(meta["obs_sizes"])
-    cfg.default_dof_pos = torch.tensor(meta["default_dof_pos"])
     cfg.kp = meta["kp"]
     cfg.kd = meta["kd"]
     cfg.command_limits = dict(meta["command_limits"])
@@ -125,8 +144,6 @@ def config_from_meta(meta, custom_impl=None):
     for key in cfg.obs_vector + [ACTION_SCALE_KEY]:
         if key not in scaling:
             raise KeyError(f"bundle has no scaling for '{key}'")
-    cfg.DeployScaling = type("DeployScaling", (), dict(scaling))
-
     cfg.bundle_meta = meta
     cfg.validate()
     return cfg

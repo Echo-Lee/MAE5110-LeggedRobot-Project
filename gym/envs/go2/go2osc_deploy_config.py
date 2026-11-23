@@ -4,7 +4,8 @@ The policy of ``go2osc_push_glide_robust`` read three signals a Go2 cannot
 measure (true foot traction, a friction estimate derived from the true
 friction, and the true body velocity), and its clocks read true foot forces.
 This task replaces all of them with what the robot computes on board
-(``go2osc_onboard.py``) and trains the state estimator together with the
+(``go2_deploy/custom_implementation/go2osc_push_glide.py``) and trains the
+state estimator together with the
 policy, from scratch, in one run:
 
     uv run scripts/train.py --task go2osc_push_glide_deploy \
@@ -18,25 +19,22 @@ Then check the joint limits and export the bundle for the robot:
         --checkpoint logs/go2osc_push_glide_deploy/<run>/model_4000.pt
 """
 
+from go2_deploy.custom_implementation.go2osc_push_glide import (
+    ACTOR_OBSERVATIONS,
+    Go2OscPushGlide,
+)
 from gym.envs.go2.go2osc_config import (
-    PHASE_OBSERVATIONS,
     Go2OscPushGlideRobustCfg,
     Go2OscPushGlideRobustRunnerCfg,
 )
 from gym.envs.go2.go2osc_est_config import (
-    ESTIMATE_OBSERVATIONS,
     Go2OscPushGlideEstCfg,
 )
 
 # Every actor input comes from the robot: IMU, joint encoders, the governed
-# command, the previous joint targets and the controller's own oscillator
-# phases (PHASE_OBSERVATIONS), the estimator's mu-hat and v-hat, and the
-# speed target v_t the controller integrates from the command and mu-hat.
-DEPLOY_ACTOR_OBSERVATIONS = (
-    ["governed_commands" if name == "commands" else name for name in PHASE_OBSERVATIONS]
-    + ESTIMATE_OBSERVATIONS
-    + ["clock_speed_obs"]
-)
+# command, previous targets, oscillator phases, estimates and speed target.
+# The custom configuration owns the ordered declaration used by both paths.
+DEPLOY_ACTOR_OBSERVATIONS = ACTOR_OBSERVATIONS
 
 
 class Go2OscPushGlideDeployCfg(Go2OscPushGlideRobustCfg):
@@ -99,11 +97,8 @@ class Go2OscPushGlideDeployCfg(Go2OscPushGlideRobustCfg):
         # per control step, with the gain, lag and noise below (inherited).
         foot_load_source = "joint_torque"
 
-    class scaling(Go2OscPushGlideRobustCfg.scaling):
-        base_lin_acc = Go2OscPushGlideEstCfg.scaling.base_lin_acc
-        contact_friction_hat = Go2OscPushGlideEstCfg.scaling.contact_friction_hat
-        base_lin_vel_hat = Go2OscPushGlideEstCfg.scaling.base_lin_vel_hat
-        governed_commands = Go2OscPushGlideRobustCfg.scaling.commands
+    class scaling(Go2OscPushGlide.DeployScaling, Go2OscPushGlideRobustCfg.scaling):
+        pass
 
 
 class Go2OscPushGlideDeployRunnerCfg(Go2OscPushGlideRobustRunnerCfg):

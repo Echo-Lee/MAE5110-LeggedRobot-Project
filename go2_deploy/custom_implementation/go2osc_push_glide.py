@@ -1,33 +1,51 @@
-"""What a Go2 computes on board for the ``go2osc_push_glide_deploy`` policy.
+"""Standalone push-glide observations and control state for the Go2 staff runner.
 
-The policy does not run alone: four phase oscillators, a speed target and a
-state estimator feed its inputs. In simulation the environment computes
-them (``go2osc_deploy.py``); on the robot this module does, from signals the
-robot has:
-
-    joint encoders        q, dq             [rad], [rad/s]
-    motor torque estimate tau               [N m]
-    IMU                   gyro, gravity     [rad/s], unit vector
-                          accelerometer     [m/s^2]
-    operator              command           [m/s, m/s, rad/s]
-                          (the policy and the speed target get it with the
-                          forward part governed: see govern_command)
-    the controller itself previous joint-target offsets [rad]
-
-Every quantity is batched over robots, in the simulator's joint order (FL,
-FR, RL, RR; hip, thigh, calf). Nothing here imports the simulator, so it
-runs on the robot's computer with torch alone. ``tests/unit_tests/
-test_go2osc_onboard.py`` steps it beside the environment and checks that
-both produce the same policy inputs.
+The actor consumes IMU and joint measurements, a governed command, previous
+joint targets, four oscillator phases and learned friction/velocity estimates.
+All observation arithmetic and state updates live here and use only PyTorch
+and the runner's CustomConfig interface. Robot communication stays in the
+staff runner; importing this module neither loads the simulator nor the SDK.
 """
 
+import argparse
+import hashlib
+import json
 import math
-import xml.etree.ElementTree as ET
+import os
 from pathlib import Path
+import sys
+import xml.etree.ElementTree as ET
 
 import torch
 
 from go2_deploy.custom_implementation.custom_config import CustomConfig
+
+# Actor input order: 58 scalars in canonical FL, FR, RL, RR joint order.
+ACTOR_OBSERVATIONS = [
+    "base_ang_vel",
+    "projected_gravity",
+    "governed_commands",
+    "dof_pos_obs",
+    "dof_vel",
+    "dof_pos_target",
+    "oscillator_obs",
+    "contact_friction_hat",
+    "base_lin_vel_hat",
+    "clock_speed_obs",
+]
+ACTOR_OBSERVATION_SIZES = {
+    "base_ang_vel": 3,
+    "projected_gravity": 3,
+    "governed_commands": 3,
+    "dof_pos_obs": 12,
+    "dof_vel": 12,
+    "dof_pos_target": 12,
+    "oscillator_obs": 8,
+    "contact_friction_hat": 1,
+    "base_lin_vel_hat": 3,
+    "clock_speed_obs": 1,
+}
+
 
 LEGS = ("FL", "FR", "RL", "RR")
 GRAVITY_M_S2 = 9.81
@@ -40,14 +58,15 @@ TRACTION_RATIO_CLIP = 2.0
 STANDING_PHASE = 1.5 * math.pi
 # Names of the policy inputs this module provides, and their sizes.
 ONBOARD_OBSERVATIONS = {
-    "oscillator_obs": 8,
-    "contact_friction_hat": 1,
-    "base_lin_vel_hat": 3,
-    "clock_speed_obs": 1,
-    "governed_commands": 3,
+    name: ACTOR_OBSERVATION_SIZES[name]
+    for name in (
+        "oscillator_obs",
+        "contact_friction_hat",
+        "base_lin_vel_hat",
+        "clock_speed_obs",
+        "governed_commands",
+    )
 }
-# This is deliberately resolved from the deploy script, not from gym/envs:
-# the custom implementation is the robot-side source of truth.
 GO2_URDF = Path(__file__).resolve().parents[2] / "resources/robots/go2/urdf/go2.urdf"
 
 
@@ -450,9 +469,15 @@ class Go2OscOnboard:
         return self.observations()
 
 
-# ── Staff CustomConfig implementation ─────────────────────────────────────
-# Everything below is intentionally local to this file.  In particular this
-# module must not import gym.envs.go2 configs or environment helpers.
+def quat_rotate_inverse(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """Rotate vector v by the inverse of quaternion q. q is [x, y, z, w]."""
+    q_w = q[..., 3:]  # [..., 1]
+    q_vec = q[..., :3]  # [..., 3]
+    a = v * (2.0 * q_w**2 - 1.0)
+    b = torch.cross(q_vec, v, dim=-1) * q_w * 2.0
+    c = q_vec * (q_vec * v).sum(dim=-1, keepdim=True) * 2.0
+    return a - b + c
+
 
 BUNDLE_VARIABLE = "GO2OSC_BUNDLE"
 ONBOARD_FILE = "go2osc_onboard.json"
@@ -461,51 +486,48 @@ UNITREE_TO_CANONICAL = torch.tensor([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8])
 STICK_DEADBAND = 0.05
 
 
-def _quat_rotate_inverse(quat, vector):
-    """Inverse-rotate vector by a scalar-last quaternion [x,y,z,w]."""
-    xyz, w = quat[..., :3], quat[..., 3:]
-    twice_cross = 2.0 * torch.cross(xyz, vector, dim=-1)
-    return vector - w * twice_cross + torch.cross(xyz, twice_cross, dim=-1)
-
-
-def _bundle_directory():
-    """The launcher passes --bundle; the environment variable is a fallback."""
-    import argparse
-    import os
-    import sys
-
+def bundle_directory():
+    """Use the runner's explicit bundle, or the adapter's environment override."""
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--bundle", type=Path)
-    args, _ = parser.parse_known_args(sys.argv[1:])
-    directory = args.bundle or os.environ.get(BUNDLE_VARIABLE)
+    arguments, _ = parser.parse_known_args(sys.argv[1:])
+    directory = arguments.bundle or os.environ.get(BUNDLE_VARIABLE)
     if not directory:
-        raise RuntimeError("go2osc_push_glide requires --bundle or GO2OSC_BUNDLE")
+        raise RuntimeError("go2osc_push_glide requires a policy bundle (--bundle)")
     return Path(directory).expanduser().resolve()
 
 
-def _load_onboard():
-    import hashlib
-    import json
-
-    directory = _bundle_directory()
+def load_onboard(directory):
+    """Load the exported settings and their hash-checked estimator on the CPU."""
+    directory = Path(directory)
     settings = json.loads((directory / ONBOARD_FILE).read_text())
     estimator_path = directory / ESTIMATOR_FILE
     digest = hashlib.sha256(estimator_path.read_bytes()).hexdigest()
     if digest != settings["estimator_sha256"]:
-        raise ValueError("estimator.pt does not match go2osc_onboard.json")
+        raise ValueError(f"{estimator_path} does not match the exported estimator hash")
     estimator = torch.jit.load(str(estimator_path), map_location="cpu").eval()
     return Go2OscOnboard(settings, estimator), settings
 
 
-def _read_sensors(controller, message):
+def check_runner_settings(cfg, settings):
+    """The runner's timing and applied actions must match the exported policy."""
+    expected = 1.0 / float(settings["dt"])
+    if not math.isclose(float(cfg.ctrl_freq), expected, rel_tol=0.0, abs_tol=1e-6):
+        raise RuntimeError(f"go2osc_push_glide needs a {expected:g} Hz control loop")
+    if cfg.exp_moving_avg:
+        raise RuntimeError("go2osc_push_glide was trained without action smoothing")
+
+
+def read_sensors(main_controller, lowstate_msg):
+    """Physical-unit observations in canonical FL, FR, RL, RR joint order."""
     motors = torch.tensor(
-        [[motor.q, motor.dq, motor.tau_est] for motor in message.motor_state[:12]],
+        [[motor.q, motor.dq, motor.tau_est] for motor in lowstate_msg.motor_state[:12]],
         dtype=torch.float,
     ).index_select(0, UNITREE_TO_CANONICAL)
-    imu = message.imu_state
-    quat = torch.tensor(imu.quaternion, dtype=torch.float)[[1, 2, 3, 0]]
-    gravity = _quat_rotate_inverse(
-        quat.unsqueeze(0), torch.tensor([[0.0, 0.0, -1.0]])
+    imu = lowstate_msg.imu_state
+    quaternion = torch.tensor(imu.quaternion, dtype=torch.float)[[1, 2, 3, 0]]
+    gravity = quat_rotate_inverse(
+        quaternion.unsqueeze(0), torch.tensor([[0.0, 0.0, -1.0]])
     )
     return {
         "dof_pos": motors[:, 0].unsqueeze(0),
@@ -514,79 +536,123 @@ def _read_sensors(controller, message):
         "base_ang_vel": torch.tensor(imu.gyroscope, dtype=torch.float).unsqueeze(0),
         "projected_gravity": gravity,
         "base_lin_acc": torch.tensor(imu.accelerometer, dtype=torch.float).unsqueeze(0),
-        "dof_pos_target": controller.last_action[0].detach().clone().unsqueeze(0),
+        "dof_pos_target": main_controller.last_action[0].detach().clone().unsqueeze(0),
     }
 
 
-class Go2OscPushGlide(CustomConfig):
-    """Self-contained 58-input push/glide deployment configuration."""
+def read_command(main_controller):
+    """Clip physical stick commands to the trained envelope, with a centre band."""
+    remote = main_controller.remote_controller
+    values = torch.tensor(
+        [remote.lin_vel_x, remote.lin_vel_y, remote.yaw_vel], dtype=torch.float
+    )
+    limits = torch.tensor(
+        [
+            main_controller.cfg.command_limits[name]
+            for name in ("lin_vel_x", "lin_vel_y", "yaw_vel")
+        ],
+        dtype=torch.float,
+    )
+    trained = torch.tensor(main_controller.go2osc_settings["command_range"])
+    low, high = torch.maximum(trained[0], -limits), torch.minimum(trained[1], limits)
+    values = torch.maximum(torch.minimum(values, high), low)
+    return torch.where(values.abs() <= STICK_DEADBAND * limits, 0.0, values)
 
+
+def standing_report(onboard, sensors):
+    loads = onboard.load[0]
+    accelerometer = sensors["base_lin_acc"][0].norm().item()
+    velocity = [round(value, 3) for value in onboard.velocity[0].tolist()]
+    return (
+        "go2osc check | foot load FL FR RL RR "
+        f"{[round(value, 3) for value in loads.tolist()]} "
+        f"(sum {loads.sum().item():.2f}) | accelerometer {accelerometer:.2f} m/s^2 "
+        f"| estimated speed {velocity} m/s, friction {onboard.friction[0, 0]:.3f}"
+    )
+
+
+class Go2OscPushGlide(CustomConfig):
     task_name = "go2osc_push_glide_deploy"
     ctrl_freq = 100
     kp = 20.0
     kd = 0.5
     exp_moving_avg = False
-
-    # Exact actor order used by the checkpoint: 3+3+3+12+12+12+8+1+3+1 = 58.
-    obs_vector = [
-        "base_ang_vel", "projected_gravity", "governed_commands", "dof_pos_obs",
-        "dof_vel", "dof_pos_target", "oscillator_obs", "contact_friction_hat",
-        "base_lin_vel_hat", "clock_speed_obs",
-    ]
-    custom_obs_sizes = dict(ONBOARD_OBSERVATIONS)
+    obs_vector = ACTOR_OBSERVATIONS
+    custom_obs_sizes = ACTOR_OBSERVATION_SIZES
     default_dof_pos = 4 * [0.0, 0.66, -1.36]
 
     class DeployScaling:
-        base_ang_vel = 0.3
+        # Observations are divided by these physical-unit scales. The actor's
+        # joint-target outputs are multiplied by dof_pos_target exactly once.
+        base_ang_vel = [0.3, 0.3, 0.1]
         projected_gravity = 1.0
-        governed_commands = [3.0, 1.0, 3.0]
+        governed_commands = [3, 1, 3]
         dof_pos_obs = 4 * [0.2, 0.3, 0.3]
         dof_vel = 4 * [2.0, 2.0, 4.0]
-        dof_pos_target = 4 * [0.1, 0.15, 0.15]
+        dof_pos_target = 4 * [0.2, 0.3, 0.3]
         oscillator_obs = 1.0
         contact_friction_hat = 1.0
-        base_lin_vel_hat = 0.3
-        clock_speed_obs = 1.0
+        base_lin_vel_hat = 0.4
+        clock_speed_obs = 3.0
+
+        # Physical features also used by the estimator and legacy bundles.
+        base_height = 0.3
+        base_lin_acc = 9.81
+        base_lin_vel = 0.4
+        commands = [3, 1, 3]
+        contact_friction_obs = 1.0
+        dof_pos = 4 * [0.2, 0.3, 0.3]
+        foot_friction_obs = 1.0
+        foot_grf_angle = 1.0
+        foot_traction_obs = 1.0
+        friction_estimate_obs = 1.0
+        oscillators_vel = 1.0
+        tau_ff = 4 * [23.7, 23.7, 45.43]
 
     def get_custom_buffers_dict(self):
-        onboard, settings = _load_onboard()
+        onboard, settings = load_onboard(bundle_directory())
         return {
             "go2osc_onboard": onboard,
             "go2osc_settings": settings,
             "go2osc_observations": onboard.observations(),
             "go2osc_command": torch.zeros(3),
             "go2osc_running": False,
+            "go2osc_checked": False,
         }
 
     def update_custom_buffers(self, main_controller, t):
+        if not main_controller.go2osc_checked:
+            check_runner_settings(main_controller.cfg, main_controller.go2osc_settings)
+            main_controller.go2osc_checked = True
         message = main_controller.last_lowstate_msg
         if message is None:
             return
-        remote = main_controller.remote_controller
-        command = torch.tensor(
-            [remote.lin_vel_x, remote.lin_vel_y, remote.yaw_vel], dtype=torch.float
-        )
-        limits = torch.tensor(
-            [main_controller.cfg.command_limits[name] for name in ("lin_vel_x", "lin_vel_y", "yaw_vel")]
-        )
-        trained = torch.tensor(main_controller.go2osc_settings["command_range"])
-        command = torch.maximum(torch.minimum(command, torch.minimum(trained[1], limits)), torch.maximum(trained[0], -limits))
-        command = torch.where(command.abs() <= STICK_DEADBAND * limits, 0.0, command)
+        sensors = read_sensors(main_controller, message)
+        command = read_command(main_controller).unsqueeze(0)
         running = main_controller._state.name == "CUSTOM_CTRL"
         onboard = main_controller.go2osc_onboard
-        sensors = _read_sensors(main_controller, message)
-        main_controller.go2osc_observations = (
-            onboard.step(sensors, command.unsqueeze(0))
-            if running and main_controller.go2osc_running
-            else onboard.reset(sensors, command.unsqueeze(0))
-        )
-        main_controller.go2osc_command = command
+        if running and main_controller.go2osc_running:
+            observations = onboard.step(sensors, command)
+        else:
+            observations = onboard.reset(sensors, command)
+        if running and not main_controller.go2osc_running:
+            print(standing_report(onboard, sensors), flush=True)
+        main_controller.go2osc_observations = observations
+        main_controller.go2osc_command = command[0].clone()
         main_controller.go2osc_running = running
 
     def get_custom_obs_pieces(self):
         pieces = {
-            name: (lambda controller, message, name=name: controller.go2osc_observations[name][0])
+            name: (
+                lambda main_controller, lowstate_msg, name=name: (
+                    main_controller.go2osc_observations[name][0]
+                )
+            )
             for name in ONBOARD_OBSERVATIONS
         }
-        pieces["governed_commands"] = lambda controller, message: controller.go2osc_observations["governed_commands"][0]
+        # The deadbanded command as the operator gave it. The actor reads
+        # governed_commands, which the on-board module derives from it.
+        pieces["commands"] = lambda main_controller, lowstate_msg: (
+            main_controller.go2osc_command
+        )
         return pieces
