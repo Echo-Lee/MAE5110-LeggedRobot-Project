@@ -1,49 +1,96 @@
-from gym.utils.task_registry import task_registry
-from gym.utils.helpers import set_seed
-import gym.envs  # noqa: F401
-from go2_deploy.deploy_config import DeployConfig
-
+from pathlib import Path
 import random
+
 import torch
 
+from gym import GYM_ROOT_DIR
+from gym.utils.helpers import select_model, set_seed
+from gym.utils.original_cfg import original_cfg_source_dir, original_task_from_run
+from gym.utils.task_registry import select_backend, task_registry
 
-# Returns Actor constructed from logs/go2/run_name (default: most recent).
+LOG_ROOT = Path(GYM_ROOT_DIR) / "logs"
+
+
+def resolve_run_dir(task_name, run_name=None):
+    """logs/<task_name>/<run_name>, or the most recent run with a checkpoint."""
+    task_dir = LOG_ROOT / task_name
+    if not task_dir.is_dir():
+        raise FileNotFoundError(f"No logs for task '{task_name}': {task_dir} not found")
+    if run_name is not None:
+        run_dir = task_dir / run_name
+        if not run_dir.is_dir():
+            raise FileNotFoundError(f"Run '{run_name}' not found in {task_dir}")
+        return run_dir
+    runs = [d for d in task_dir.iterdir() if d.is_dir() and any(d.glob("model_*.pt"))]
+    if not runs:
+        raise FileNotFoundError(f"No runs with a model_*.pt checkpoint in {task_dir}")
+    return max(runs, key=lambda d: d.stat().st_ctime)
+
+
+# Returns the Actor of a run in logs/<task_name>/ (default: most recent), where
+# task_name comes from deploy_cfg.custom_impl. The task class, env and train
+# configs all come from that run's saved source, not from the repo's gym.envs;
+# the only code taken from outside the log is the CustomConfig extension.
 # Builds the training env, so only use this on the PC; the robot loads bundles.
 def setup_actor(run_name=None, deploy_cfg=None):
     if deploy_cfg is None:
-        deploy_cfg = DeployConfig()
-    env_cfg, train_cfg = task_registry.get_cfgs(
-        name=deploy_cfg.task_name, original_cfg=True, load_run=run_name
-    )
+        raise ValueError("Must pass the DeployConfig built from the task's custom_impl")
+    task_name = deploy_cfg.task_name
+    run_dir = resolve_run_dir(task_name, run_name)
+    if not any(run_dir.glob("model_*.pt")):
+        raise FileNotFoundError(f"No model_*.pt checkpoint in {run_dir}")
+    checkpoint = run_dir / select_model(str(run_dir), -1)
 
-    env_cfg.env.num_envs = 1
-    env_cfg.env.episode_length_s = 99999
-    if hasattr(env_cfg, "commands"):
-        env_cfg.commands.resampling_time = 99999
-    if hasattr(env_cfg, "push_robots"):
-        env_cfg.push_robots.toggle = False
-    if hasattr(env_cfg, "init_state") and hasattr(env_cfg.init_state, "reset_mode"):
-        env_cfg.init_state.reset_mode = "reset_to_range"
+    # Raises OriginalCfgError if the run's snapshot does not declare task_name
+    with original_task_from_run(task_name, run_dir) as (task_class, env_cfg, train_cfg):
+        print(f"Loaded task '{task_name}' from: {original_cfg_source_dir(run_dir)}")
 
-    env_cfg.seed = random.randint(0, 10000)
-    train_cfg.seed = random.randint(0, 10000)
+        env_cfg.env.num_envs = 1
+        env_cfg.env.episode_length_s = 99999
+        if hasattr(env_cfg, "commands"):
+            env_cfg.commands.resampling_time = 99999
+        if hasattr(env_cfg, "push_robots"):
+            env_cfg.push_robots.toggle = False
+        if hasattr(env_cfg, "init_state") and hasattr(env_cfg.init_state, "reset_mode"):
+            env_cfg.init_state.reset_mode = "reset_to_range"
 
-    train_cfg.runner.device = "cpu"
-    train_cfg.runner.resume = True
-    train_cfg.runner.checkpoint = -1
-    train_cfg.logging.enable_local_saving = False
+        env_cfg.seed = random.randint(0, 10000)
+        train_cfg.seed = random.randint(0, 10000)
 
-    task_registry.convert_frequencies_to_params(env_cfg, train_cfg)
-    task_registry.set_log_dir_name(train_cfg)
-    set_seed(env_cfg.seed)
+        train_cfg.runner.device = "cpu"
+        train_cfg.runner.resume = False  # the checkpoint is loaded below
+        train_cfg.runner.experiment_name = task_name
+        train_cfg.runner.load_run = run_dir.name
+        train_cfg.logging.enable_local_saving = False
 
-    env = task_registry.make_env(
-        name=deploy_cfg.task_name, env_cfg=env_cfg, device="cpu", headless=True
-    )
+        task_registry.convert_frequencies_to_params(env_cfg, train_cfg)
+        task_registry.set_log_dir_name(train_cfg)
+        env_cfg.seed = set_seed(env_cfg.seed)
 
-    runner = task_registry.make_alg_runner(env, train_cfg)
-    runner.switch_to_eval()
-    return runner.alg.actor
+        # Built inside the block so the backend also comes from the snapshot
+        env = task_class(
+            cfg=env_cfg,
+            device="cpu",
+            headless=True,
+            backend=select_backend(env_cfg, "cpu"),
+        )
+        try:
+            runner = task_registry.make_alg_runner(env, train_cfg)
+            print(f"Loading model from: {checkpoint}")
+            runner.load(str(checkpoint), load_optimizer=False)
+            runner.switch_to_eval()
+            actor = runner.alg.actor
+            deploy_cfg.run_dir = str(run_dir)
+        finally:
+            env._backend.close()
+
+    if actor.num_obs != deploy_cfg.obs_dim():
+        raise ValueError(
+            f"{run_dir} actor takes {actor.num_obs} obs, but "
+            f"{type(deploy_cfg.custom_impl).__name__}.obs_vector gives "
+            f"{deploy_cfg.obs_dim()}"
+        )
+    return actor
 
 
 class RLController:

@@ -6,7 +6,6 @@ from go2_deploy.unitree_remote_controller import UnitreeRemoteController, RCHand
 from go2_deploy.utility import deploy_utility
 from go2_deploy.utility.csv_logger import CSVLogger
 from go2_deploy.utility.thread import RecurrentThread
-from go2_deploy.utility.import_custom_impl import custom_impl
 
 import torch
 from unitree_sdk2py.core.channel import (
@@ -23,6 +22,7 @@ from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import (
     MotionSwitcherClient,
 )
 from unitree_sdk2py.utils.crc import CRC
+
 
 class MainController:
     # cfg and rl_controller must come from the same source (one bundle, or the
@@ -100,7 +100,7 @@ class MainController:
 
     # initialize student-provided custom buffers
     def _init_custom_buffers(self):
-        custom_buffers_dict = custom_impl.get_custom_buffers_dict()
+        custom_buffers_dict = self.cfg.custom_impl.get_custom_buffers_dict()
         for key, value in custom_buffers_dict.items():
             setattr(self, key, value)
 
@@ -157,8 +157,7 @@ class MainController:
 
     # Process student-provided custom buffers in control loop
     def _process_custom_buffers(self, t):
-        custom_impl.update_custom_buffers(self, t)
-
+        self.cfg.custom_impl.update_custom_buffers(self, t)
 
     # Read last lowstate msg, publish LowCmd_
     # KNOWN RISK: if this process dies outright (OOM, kill) while in

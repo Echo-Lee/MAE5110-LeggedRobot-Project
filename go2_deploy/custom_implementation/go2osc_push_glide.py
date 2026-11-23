@@ -14,6 +14,7 @@ import sys
 
 import torch
 
+from go2_deploy.custom_implementation.custom_config import CustomConfig
 from gym.envs.go2.go2osc_deploy_config import (
     DEPLOY_ACTOR_OBSERVATIONS,
     Go2OscPushGlideDeployCfg,
@@ -26,14 +27,6 @@ ONBOARD_FILE = "go2osc_onboard.json"
 ESTIMATOR_FILE = "estimator.pt"
 UNITREE_TO_CANONICAL = torch.tensor([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8])
 STICK_DEADBAND = 0.05
-
-
-class CustomDeployConfig:
-    obs_vector = list(DEPLOY_ACTOR_OBSERVATIONS)
-    custom_obs_sizes = dict(ONBOARD_OBSERVATIONS)
-
-    class DeployScaling(Go2OscPushGlideDeployCfg.scaling):
-        pass
 
 
 def bundle_directory():
@@ -66,18 +59,6 @@ def check_runner_settings(cfg, settings):
         raise RuntimeError(f"go2osc_push_glide needs a {expected:g} Hz control loop")
     if cfg.exp_moving_avg:
         raise RuntimeError("go2osc_push_glide was trained without action smoothing")
-
-
-def get_custom_buffers_dict():
-    onboard, settings = load_onboard(bundle_directory())
-    return {
-        "go2osc_onboard": onboard,
-        "go2osc_settings": settings,
-        "go2osc_observations": onboard.observations(),
-        "go2osc_command": torch.zeros(3),
-        "go2osc_running": False,
-        "go2osc_checked": False,
-    }
 
 
 def read_sensors(main_controller, lowstate_msg):
@@ -133,40 +114,66 @@ def standing_report(onboard, sensors):
     )
 
 
-def update_custom_buffers(main_controller, t):
-    if not main_controller.go2osc_checked:
-        check_runner_settings(main_controller.cfg, main_controller.go2osc_settings)
-        main_controller.go2osc_checked = True
-    message = main_controller.last_lowstate_msg
-    if message is None:
-        return
-    sensors = read_sensors(main_controller, message)
-    command = read_command(main_controller).unsqueeze(0)
-    running = main_controller._state.name == "CUSTOM_CTRL"
-    onboard = main_controller.go2osc_onboard
-    if running and main_controller.go2osc_running:
-        observations = onboard.step(sensors, command)
-    else:
-        observations = onboard.reset(sensors, command)
-    if running and not main_controller.go2osc_running:
-        print(standing_report(onboard, sensors), flush=True)
-    main_controller.go2osc_observations = observations
-    main_controller.go2osc_command = command[0].clone()
-    main_controller.go2osc_running = running
+class Go2OscPushGlide(CustomConfig):
+    task_name = "go2osc_push_glide_deploy"
+    ctrl_freq = 100
+    kp = 20.0
+    kd = 0.5
+    exp_moving_avg = False
+    obs_vector = list(DEPLOY_ACTOR_OBSERVATIONS)
+    custom_obs_sizes = dict(ONBOARD_OBSERVATIONS)
+    default_dof_pos = 4 * [
+        Go2OscPushGlideDeployCfg.init_state.default_joint_angles[joint]
+        for joint in ("hip", "thigh", "calf")
+    ]
 
+    class DeployScaling(Go2OscPushGlideDeployCfg.scaling):
+        pass
 
-def get_custom_obs_pieces():
-    pieces = {
-        name: (
-            lambda main_controller, lowstate_msg, name=name: (
-                main_controller.go2osc_observations[name][0]
+    def get_custom_buffers_dict(self):
+        onboard, settings = load_onboard(bundle_directory())
+        return {
+            "go2osc_onboard": onboard,
+            "go2osc_settings": settings,
+            "go2osc_observations": onboard.observations(),
+            "go2osc_command": torch.zeros(3),
+            "go2osc_running": False,
+            "go2osc_checked": False,
+        }
+
+    def update_custom_buffers(self, main_controller, t):
+        if not main_controller.go2osc_checked:
+            check_runner_settings(main_controller.cfg, main_controller.go2osc_settings)
+            main_controller.go2osc_checked = True
+        message = main_controller.last_lowstate_msg
+        if message is None:
+            return
+        sensors = read_sensors(main_controller, message)
+        command = read_command(main_controller).unsqueeze(0)
+        running = main_controller._state.name == "CUSTOM_CTRL"
+        onboard = main_controller.go2osc_onboard
+        if running and main_controller.go2osc_running:
+            observations = onboard.step(sensors, command)
+        else:
+            observations = onboard.reset(sensors, command)
+        if running and not main_controller.go2osc_running:
+            print(standing_report(onboard, sensors), flush=True)
+        main_controller.go2osc_observations = observations
+        main_controller.go2osc_command = command[0].clone()
+        main_controller.go2osc_running = running
+
+    def get_custom_obs_pieces(self):
+        pieces = {
+            name: (
+                lambda main_controller, lowstate_msg, name=name: (
+                    main_controller.go2osc_observations[name][0]
+                )
             )
+            for name in ONBOARD_OBSERVATIONS
+        }
+        # The deadbanded command as the operator gave it. The actor reads
+        # governed_commands, which the on-board module derives from it.
+        pieces["commands"] = lambda main_controller, lowstate_msg: (
+            main_controller.go2osc_command
         )
-        for name in ONBOARD_OBSERVATIONS
-    }
-    # The deadbanded command as the operator gave it. The actor reads
-    # governed_commands, which the on-board module derives from it.
-    pieces["commands"] = lambda main_controller, lowstate_msg: (
-        main_controller.go2osc_command
-    )
-    return pieces
+        return pieces

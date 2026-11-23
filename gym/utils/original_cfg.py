@@ -34,7 +34,9 @@ def original_cfg_source_dir(run_dir: str | Path) -> Path:
     return run_dir / "files" / "gym" / "envs"
 
 
-def _read_saved_manifest(manifest_path: Path) -> dict[str, dict]:
+def _read_saved_manifest(
+    manifest_path: Path, required: tuple[str, ...] = _MANIFEST_NAMES
+) -> dict[str, dict]:
     """Read the literal registry dictionaries without executing the snapshot."""
     try:
         source = manifest_path.read_text()
@@ -58,7 +60,7 @@ def _read_saved_manifest(manifest_path: Path) -> dict[str, dict]:
         elif isinstance(node, ast.AnnAssign):
             target = node.target
 
-        if not isinstance(target, ast.Name) or target.id not in _MANIFEST_NAMES:
+        if not isinstance(target, ast.Name) or target.id not in required:
             continue
 
         try:
@@ -74,7 +76,7 @@ def _read_saved_manifest(manifest_path: Path) -> dict[str, dict]:
             )
         manifest[target.id] = value
 
-    missing = sorted(set(_MANIFEST_NAMES) - set(manifest))
+    missing = sorted(set(required) - set(manifest))
     if missing:
         raise OriginalCfgError(
             f"Saved config manifest {manifest_path} is missing: {', '.join(missing)}"
@@ -284,3 +286,61 @@ def load_original_cfgs(
 
     env_cfg, train_cfg = load_original_cfgs_from_run(task_name, run_dir)
     return env_cfg, train_cfg, run_dir
+
+
+@contextmanager
+def original_task_from_run(task_name: str, run_dir: str | Path):
+    """Yield (task_class, env_cfg, train_cfg) built only from a run's snapshot.
+
+    Unlike load_original_cfgs_from_run, the task class is also taken from the
+    snapshot, and nothing is looked up in the current gym.envs registry: the
+    task must be declared in the run's own gym/envs/__init__.py. While inside
+    the block, every gym.envs import (including the simulator backend that
+    make-env code imports) resolves to the snapshot, so build the env there.
+    """
+    run_dir = Path(run_dir).resolve()
+    saved_envs_dir = original_cfg_source_dir(run_dir)
+    manifest_path = saved_envs_dir / "__init__.py"
+    manifest = _read_saved_manifest(manifest_path, _MANIFEST_NAMES + ("class_dict",))
+    (
+        env_cfg_name,
+        env_cfg_location,
+        train_cfg_name,
+        train_cfg_location,
+    ) = _config_declarations(task_name, manifest, manifest_path)
+    class_name = manifest["task_dict"][task_name][0]
+    try:
+        class_location = manifest["class_dict"][class_name]
+    except KeyError as error:
+        raise OriginalCfgError(
+            f"Task class {class_name!r} for {task_name!r} is not declared in "
+            f"class_dict of {manifest_path}"
+        ) from error
+
+    declared = [
+        (class_name, _absolute_module_name(class_location, manifest_path)),
+        (env_cfg_name, _absolute_module_name(env_cfg_location, manifest_path)),
+        (train_cfg_name, _absolute_module_name(train_cfg_location, manifest_path)),
+    ]
+    for _, module_name in declared:
+        _require_module_file(module_name, saved_envs_dir, manifest_path)
+
+    with _saved_env_imports(saved_envs_dir):
+        loaded = []
+        for symbol, module_name in declared:
+            try:
+                module = importlib.import_module(module_name)
+            except ImportError as error:
+                raise OriginalCfgError(
+                    f"Could not import {module_name} for task {task_name!r} "
+                    f"from {saved_envs_dir}"
+                ) from error
+            try:
+                loaded.append(getattr(module, symbol))
+            except AttributeError as error:
+                raise OriginalCfgError(
+                    f"{symbol} declared for task {task_name!r} was not found in "
+                    f"{module_name} of {saved_envs_dir}"
+                ) from error
+        task_class, env_cfg_class, train_cfg_class = loaded
+        yield task_class, env_cfg_class(), train_cfg_class()

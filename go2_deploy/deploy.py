@@ -3,6 +3,7 @@ import signal
 import sys
 import time
 
+
 def main():
     parser = argparse.ArgumentParser(description="Deploy a policy to a Unitree Go2.")
     parser.add_argument("interface", help="Robot network interface, e.g. eth0")
@@ -11,7 +12,15 @@ def main():
         help="Policy bundle directory from scripts/export_go2_policy.py. "
         "Without it, the actor is built from the latest training run in logs/.",
     )
+    parser.add_argument(
+        "--task",
+        help="Task name (e.g. go2trot); selects the CustomConfig subclass in "
+        "go2_deploy/custom_implementation/. Required without --bundle; with "
+        "--bundle it defaults to the bundle's task.",
+    )
     args = parser.parse_args()
+    if not args.bundle and not args.task:
+        parser.error("--task is required when not deploying from --bundle")
     if sys.platform != "linux":
         parser.error("Go2 deployment requires Linux (timerfd).")
 
@@ -24,7 +33,7 @@ def main():
         parser.error(
             "Unitree SDK is not installed. Follow README_DEPLOY.md, then run "
             "uv run --frozen --extra unitree_sdk python -m go2_deploy.deploy "
-            "<interface>."
+            "<interface> --task <task>."
         )
 
     from go2_deploy.utility.csv_logger import new_run_dir
@@ -40,15 +49,20 @@ def main():
     from go2_deploy.rl_controller import RLController
 
     # Load the policy before touching the robot, so a bad bundle fails here.
+    from go2_deploy.utility.import_custom_impl import load_custom_impl
+
+    custom_impl = load_custom_impl(args.task) if args.task else None
     if args.bundle:
         from go2_deploy.policy_bundle import load_bundle
 
-        policy, cfg = load_bundle(args.bundle)
+        # Without --task, load_bundle picks the impl for the bundle's task_name
+        policy, cfg = load_bundle(args.bundle, custom_impl)
         print(f"Loaded policy bundle {args.bundle}")
     else:
         from go2_deploy.deploy_config import DeployConfig
 
-        policy, cfg = None, DeployConfig()
+        policy, cfg = None, DeployConfig(custom_impl)
+    print(f"Using custom implementation {type(cfg.custom_impl).__name__}")
     rl_controller = RLController(cfg, policy)
 
     # CycloneDDS 0.10.2 bug workaround

@@ -1,6 +1,5 @@
 import torch
 from gym.utils.torch_quat import quat_rotate_inverse
-from go2_deploy.utility.import_custom_impl import custom_impl
 
 # Unitree motor order: Front Right hip (haa), FR thigh (hfe), FR calf (kfe),
 # Front Left ... Rear Right ... Rear Left
@@ -10,6 +9,7 @@ QGYM_TO_UNITREE_JOINT_IDX = torch.tensor([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8])
 
 
 # Compute pieces of the observation vector, returning torch tensors
+
 
 def _get_obs_base_ang_vel(main_controller, lowstate_msg):
     return torch.tensor(lowstate_msg.imu_state.gyroscope)
@@ -79,7 +79,7 @@ def lowstate_to_obs(main_controller, lowstate_msg):
         "dof_pos_target": _get_obs_dof_pos_target,
     }
 
-    custom_obs_pieces = custom_impl.get_custom_obs_pieces()
+    custom_obs_pieces = main_controller.cfg.custom_impl.get_custom_obs_pieces()
     get_obs_piece.update(custom_obs_pieces)
 
     obs_vector = torch.zeros(main_controller.obs_vec_size)

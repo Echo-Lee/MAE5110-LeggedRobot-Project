@@ -175,6 +175,7 @@ gh release create push-glide-v1 push_glide_v1.tar.gz \
 
 ```sh
 uv run --frozen --extra unitree_sdk python -m go2_deploy.deploy <nic> \
+    --task go2osc_push_glide_deploy \
     --bundle logs/policies/push_glide_v1
 ```
 
@@ -196,12 +197,22 @@ policy was trained with:
 
 - no bundle (it carries the estimator and the clamp);
 - a control rate other than 100 Hz;
-- action smoothing on. `go2_deploy/deploy_config.py` now sets
-  `exp_moving_avg = False`; the staff default (0.095 s) would lag every
+- action smoothing on. `Go2OscPushGlide` sets
+  `exp_moving_avg = False`; the generic default (0.095 s) would lag every
   joint target by about a tenth of a second, which the policy never saw.
 
-The runner loads `go2osc_push_glide.py` by default; set
-`GO2_CUSTOM_IMPL=go2trot_base.py` for the staff's trot template.
+The wireless runner discovers `Go2OscPushGlide`, a `CustomConfig` subclass,
+by its `task_name = "go2osc_push_glide_deploy"`. Its instance supplies the
+custom buffers and observation callbacks. The class sets 100 Hz, kp 20,
+kd 0.5 and no smoothing; bundle metadata supplies the saved scales and
+posture. Use `--task go2trot` for the staff's trot template.
+
+For policy review, provide `logs/<task>/<run>/model_<iteration>.pt` and the
+same run's `files/gym/envs/go2/` source snapshot. Preserve the original
+training snapshot when an experiment directory differs from the task name.
+The raw log folder supports reconstruction; this task requires the complete
+exported bundle for deployment because it includes the estimator, settings
+and final output clamp.
 
 ### Before pressing A (policy on)
 
@@ -249,15 +260,11 @@ fake LowState message matches the training observation.
 - **Training.** Forward locomotion, friction estimation and controlled
   sliding must be evaluated on checkpoints trained with the current rewards
   and target bounds.
-- **Hand-over.** Whether the policy keeps walking once its inputs are μ̂
-  and v̂ only is not verified until a run passes iteration 2000.
-- **Speed with the clamp.** How much of the speed lost to the clamp the
-  fine-tune recovers is not known until a run passes iteration 1500.
+- **Checkpoint behavior.** Passing the hand-over and clamp schedules does
+  not establish locomotion quality; evaluate the selected checkpoint with
+  its exported controller settings.
 - **The real signals.** `tau_est`, the accelerometer and the gyroscope are
   assumed to follow the simulator's conventions (torque about the joint
   axis, specific force in the body frame). The signal check above is the
   first test of that.
 - **Robot mass.** Foot loads are in body weights of the URDF's 16.3 kg.
-- **`tests/unit_tests/test_go2_deploy_obs.py`** is skipped: it targets the
-  earlier Go2Trot runner and 7 of its tests fail on staff branch
-  `test-11-19` itself.
