@@ -57,11 +57,11 @@ SSH instructions:
 - Optionally run `ssh-copy-id unitree@192.168.123.18` so later logins don't ask for a password.
 - **The Jetson has no internet by default**, and `uv`, the wheels and the CycloneDDS clone all need it. Share the PC's connection over the cable (only the PC authenticates to eduroam):
   ```bash
-  # Run this on the host PC (WAN=wlan0, LAN=the ethernet NIC to the robot)
+  # Run this on the host PC (WAN=wlan0, LAN=eno1 the ethernet NIC to the robot)
   sudo sysctl -w net.ipv4.ip_forward=1
-  sudo iptables -t nat -A POSTROUTING -o wlan0 -j MASQUERADE
-  sudo iptables -A FORWARD -i <LAN> -o wlan0 -j ACCEPT
-  sudo iptables -A FORWARD -i wlan0 -o <LAN> -m state --state RELATED,ESTABLISHED -j ACCEPT
+  sudo iptables -t nat -A POSTROUTING -o wlp9s0 -j MASQUERADE
+  sudo iptables -A FORWARD -i eno1 -o wlp9s0 -j ACCEPT
+  sudo iptables -A FORWARD -i wlp9s0 -o eno1 -m state --state RELATED,ESTABLISHED -j ACCEPT
   # Run this on Jetson (via ssh)
   sudo ip route replace default via 192.168.123.99
   echo "nameserver 1.1.1.1" | sudo tee /etc/resolv.conf   # temporary
@@ -82,6 +82,7 @@ Install `uv` and `tmux`, `uv python install 3.11`
 
 2. **Over the cable, install the bundle:**
    `uv run --frozen python scripts/deploy_go2_remote.py --bundle logs/policies/trot_v1 --host unitree@192.168.123.18 --install`
+   Wireless: include `--install`. Over ethernet: don't include `--install`.
 
 3. Unplug. With the robot lying down in a clear area, **hold L1 + R1 for 1 s**.
    The launcher (`go2_deploy/launcher.py`) only listens to the remote, and
@@ -98,3 +99,5 @@ Install `uv` and `tmux`, `uv python install 3.11`
    `exit.json` means it was SIGKILLed or lost power.
    `logs/deploy/launcher.log` lists every L1 + R1 / L2 + R2 press and launcher
    boot.
+
+   Manually get logs: `rsync -avh -r --progress unitree@192.168.123.18:/home/unitree/BigRedGym/logs/deploy/2026-11-24_03-08-09 ./logs`
