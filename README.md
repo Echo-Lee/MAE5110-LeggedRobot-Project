@@ -225,6 +225,14 @@ On Linux, replace `mjpython` with `python`. Add `--load_run <run-directory>` to
 select a particular run, or `--friction 0.05` for a fixed low-friction surface.
 The keyboard controls above also apply to this task.
 
+## Hardware: `go2osc_push_glide_deploy`
+
+The robust task's actor reads signals a Go2 cannot measure.
+`go2osc_push_glide_deploy` replaces them with a state estimator trained in
+the same run, drives the clocks from joint torques, and keeps joint targets
+inside the joint limits. Training, the joint-limit check, the policy bundle
+and the deploy runner are described in [GO2OSC_DEPLOY.md](GO2OSC_DEPLOY.md).
+
 ## Go2 visuals and video recording
 
 The Go2 renders with its real meshes once they are downloaded (MuJoCo

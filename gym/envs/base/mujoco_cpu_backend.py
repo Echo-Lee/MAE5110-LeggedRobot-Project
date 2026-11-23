@@ -8,6 +8,7 @@ after each step.
 
 import copy
 import os
+from queue import Empty, SimpleQueue
 import time
 
 import mujoco
@@ -47,6 +48,11 @@ class MuJocoCPUBackend(MuJocoBackendBase):
         self._show_ui = False  # overridden from cfg.viewer.show_ui in setup()
         self._viewer_key_callback = None
         self._viewer_overlay_fn = None  # called each render() before sync()
+        self._viewer_exit_requested = False
+        self._protected_shortcuts = {}
+        self._shortcut_values = {}
+        self._pending_shortcuts = SimpleQueue()
+        self._deferred_shortcuts = set()
         # Root-tracking camera request; applied to the viewer on the next
         # render(), since the viewer is created lazily there.
         self._camera_tracking = False
@@ -193,6 +199,7 @@ class MuJocoCPUBackend(MuJocoBackendBase):
     # ── World building ─────────────────────────────────────────────────────────
 
     def setup(self, cfg, num_envs: int, device: str, task=None) -> None:
+        self._viewer_exit_requested = False
         self._device = device
         self._num_envs = num_envs
         self._randomize_contact_friction = contact_friction_range(cfg) is not None
@@ -386,6 +393,112 @@ class MuJocoCPUBackend(MuJocoBackendBase):
     TRACKING_ELEVATION_DEG = -20.0
     TRACKING_AZIMUTH_DEG = 135.0
 
+    def protect_viewer_shortcuts(self, keycodes) -> None:
+        """Keep teleop presses from changing MuJoCo's visualization options.
+
+        Only a pressed key's colliding fields are restored. Ordinary viewer UI
+        edits remain available and become the baseline for subsequent presses.
+        """
+        keycodes = set(keycodes)
+        shortcuts = {}
+        for kind, table in (
+            ("vis", mujoco.mjVISSTRING),
+            ("render", mujoco.mjRNDSTRING),
+        ):
+            for index, (_, _, shortcut) in enumerate(table):
+                if len(shortcut) == 1 and ord(shortcut.upper()) in keycodes:
+                    shortcuts.setdefault(ord(shortcut.upper()), set()).add(
+                        (kind, index)
+                    )
+        self._protected_shortcuts = shortcuts
+        self._deferred_shortcuts.clear()
+        self._pending_shortcuts = SimpleQueue()
+        self._shortcut_values = {}
+        if self._viewer is None:
+            options, scene = mujoco.MjvOption(), mujoco.MjvScene()
+            for fields in shortcuts.values():
+                for kind, index in fields:
+                    value = (
+                        options.flags[index] if kind == "vis" else scene.flags[index]
+                    )
+                    self._shortcut_values[kind, index] = int(value)
+        else:
+            with self._viewer.lock():
+                self._remember_shortcut_values(self._viewer)
+
+    @staticmethod
+    def _shortcut_value(viewer, field):
+        kind, index = field
+        if kind == "vis":
+            return int(viewer.opt.flags[index])
+        return int(viewer.user_scn.flags[index])
+
+    def _remember_shortcut_values(self, viewer, exclude=()) -> None:
+        for fields in self._protected_shortcuts.values():
+            for field in fields:
+                if field not in exclude:
+                    self._shortcut_values[field] = self._shortcut_value(viewer, field)
+
+    def _take_pending_shortcuts(self):
+        fields, self._deferred_shortcuts = self._deferred_shortcuts, set()
+        while True:
+            try:
+                keycode = self._pending_shortcuts.get_nowait()
+            except Empty:
+                return fields
+            fields.update(self._protected_shortcuts.get(keycode, ()))
+
+    def _restore_shortcut_values(self, viewer, fields) -> None:
+        for field in fields:
+            kind, index = field
+            value = self._shortcut_values[field]
+            if kind == "vis":
+                viewer.opt.flags[index] = value
+            else:
+                viewer.user_scn.flags[index] = value
+
+    def _sync_viewer(self, viewer) -> None:
+        if not self._protected_shortcuts:
+            viewer.sync()
+            return
+        with viewer.lock():
+            changed = self._take_pending_shortcuts()
+            self._restore_shortcut_values(viewer, changed)
+        viewer.sync()
+        with viewer.lock():
+            changed.update(self._take_pending_shortcuts())
+            self._restore_shortcut_values(viewer, changed)
+        if changed:
+            # Native render flags arrive via user_scn during sync. Synchronize
+            # the restored values once more so they reach the native scene.
+            viewer.sync()
+        with viewer.lock():
+            late = self._take_pending_shortcuts()
+            self._deferred_shortcuts.update(late)
+            self._remember_shortcut_values(viewer, exclude=late)
+
+    def _dispatch_viewer_key(self, keycode) -> None:
+        # MuJoCo forwards Escape after its own free-camera action. The main
+        # simulation thread closes the viewer, never this UI callback thread.
+        if keycode in (256, 27):
+            self._viewer_exit_requested = True
+        if keycode in self._protected_shortcuts:
+            self._pending_shortcuts.put(keycode)
+            if self._viewer is not None:
+                # Native handling precedes this callback, and opt is shared.
+                # Undo its visualization toggles before the GUI can draw them.
+                with self._viewer.lock():
+                    self._restore_shortcut_values(
+                        self._viewer,
+                        {
+                            field
+                            for field in self._protected_shortcuts[keycode]
+                            if field[0] == "vis"
+                        },
+                    )
+        if self._viewer_key_callback is not None:
+            self._viewer_key_callback(keycode)
+
     @property
     def camera_tracking(self) -> bool:
         return self._camera_tracking
@@ -439,18 +552,13 @@ class MuJocoCPUBackend(MuJocoBackendBase):
             # Indirect through a wrapper so callers can set _viewer_key_callback
             # after the viewer is up (LeggedRobot.__init__ calls reset()→step()
             # →_render() during construction, before any user interface installs).
-            def _key_dispatch(keycode, _self=self):
-                if _self._viewer_key_callback is not None:
-                    _self._viewer_key_callback(keycode)
-
-            # Side panels are hidden by default: their shortcuts bind most
-            # letters to visualisation toggles, which fire alongside keyboard
-            # teleop (see gym/utils/interfaces/teleop_bindings.py).
-            # cfg.viewer.show_ui / play.py --viewer_ui restores them.
+            # Hidden panels keep the view clear but leave native shortcuts
+            # active. The keyboard adapter registers its conflicting keys
+            # with protect_viewer_shortcuts. --viewer_ui shows the panels.
             self._viewer = mujoco.viewer.launch_passive(
                 self._mjm,
                 self._datas[0],
-                key_callback=_key_dispatch,
+                key_callback=self._dispatch_viewer_key,
                 show_left_ui=self._show_ui,
                 show_right_ui=self._show_ui,
             )
@@ -472,7 +580,15 @@ class MuJocoCPUBackend(MuJocoBackendBase):
                 self._apply_camera_tracking(self._viewer)
             if self._viewer_overlay_fn is not None:
                 self._viewer_overlay_fn(self._viewer)
-            self._viewer.sync()
+            self._sync_viewer(self._viewer)
         else:
             self._render_deadline = None
             self._render_pending_time = 0.0
+
+    def close(self) -> None:
+        """Close the passive viewer from the caller's thread, once."""
+        viewer, self._viewer = self._viewer, None
+        self._render_deadline = None
+        self._render_pending_time = 0.0
+        if viewer is not None:
+            viewer.close()

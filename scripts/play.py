@@ -288,10 +288,21 @@ def command_schedule(env, args):
     return lambda step: held
 
 
+def _playback_stopped(env):
+    if env.exit or getattr(env._backend, "_viewer_exit_requested", False):
+        return True
+    viewer = getattr(env._backend, "_viewer", None)
+    return viewer is not None and not viewer.is_running()
+
+
 def play(env, runner, command_at):
     n_steps = 10 * int(env.max_episode_length)
     for step in range(n_steps):
+        if _playback_stopped(env):
+            break
         policy_step(env, runner, command_at(step))
+        if _playback_stopped(env):
+            break
         env.check_exit()
 
 
@@ -318,64 +329,67 @@ def main(argv=None):
     select_mujoco_gl(args)
     with torch.no_grad():
         env, runner = setup(args)
-        command_at = command_schedule(env, args)
-        # The MuJoCo warp (GPU) backend is headless-only: render() is a no-op and
-        # it has no passive viewer, so nothing draws.  Point the user at cpu.
-        if (
-            args.backend == "mujoco"
-            and not args.headless
-            and not hasattr(env._backend, "_viewer_overlay_fn")
-        ):
-            print(
-                "WARNING: the MuJoCo warp (GPU) backend has no interactive viewer "
-                "— nothing will render. Use --device cpu for playback."
-            )
-        if args.follow_camera and not args.headless:
-            # Fixed-base tasks (pendulum, cartpole) have nothing to follow
-            # and keep their configured camera silently.
-            if not hasattr(env._backend, "set_camera_tracking"):
+        try:
+            command_at = command_schedule(env, args)
+            # The MuJoCo warp (GPU) backend is headless-only: render() is a no-op and
+            # it has no passive viewer, so nothing draws.  Point the user at cpu.
+            if (
+                args.backend == "mujoco"
+                and not args.headless
+                and not hasattr(env._backend, "_viewer_overlay_fn")
+            ):
                 print(
-                    "WARNING: --follow_camera is only supported by the MuJoCo "
-                    "CPU viewer; keeping the configured camera."
+                    "WARNING: the MuJoCo warp (GPU) backend has no interactive viewer "
+                    "— nothing will render. Use --device cpu for playback."
                 )
-            elif env._backend.supports_camera_tracking:
-                env._backend.set_camera_tracking(True)
-        if (
-            args.keyboard
-            and args.command is None
-            and hasattr(env, "commands")
-            and not args.headless
-        ):
-            # Each viewer has its own input model: MuJoCo dispatches key
-            # events via a callback, vlearn polls key state per frame.
-            if args.backend == "vsim":
-                from gym.utils.interfaces.VsimKeyboardInterface import (
-                    VsimKeyboardInterface,
-                )
+            if args.follow_camera and not args.headless:
+                # Fixed-base tasks (pendulum, cartpole) have nothing to follow
+                # and keep their configured camera silently.
+                if not hasattr(env._backend, "set_camera_tracking"):
+                    print(
+                        "WARNING: --follow_camera is only supported by the MuJoCo "
+                        "CPU viewer; keeping the configured camera."
+                    )
+                elif env._backend.supports_camera_tracking:
+                    env._backend.set_camera_tracking(True)
+            if (
+                args.keyboard
+                and args.command is None
+                and hasattr(env, "commands")
+                and not args.headless
+            ):
+                # Each viewer has its own input model: MuJoCo dispatches key
+                # events via a callback, vlearn polls key state per frame.
+                if args.backend == "vsim":
+                    from gym.utils.interfaces.VsimKeyboardInterface import (
+                        VsimKeyboardInterface,
+                    )
 
-                VsimKeyboardInterface(env)
+                    VsimKeyboardInterface(env)
+                else:
+                    from gym.utils.interfaces.MujocoKeyboardInterface import (
+                        MujocoKeyboardInterface,
+                    )
+
+                    MujocoKeyboardInterface(env)
+            if hasattr(env, "commands") and not args.headless:
+                # Same indicators, different drawing primitives per viewer.
+                if args.backend == "vsim":
+                    from gym.utils.interfaces.VsimCommandVisualizer import (
+                        VsimCommandVisualizer,
+                    )
+
+                    VsimCommandVisualizer(env)
+                else:
+                    from gym.utils.interfaces.CommandVisualizer import CommandVisualizer
+
+                    CommandVisualizer(env)
+            if args.video:
+                record(env, runner, args, command_at)
             else:
-                from gym.utils.interfaces.MujocoKeyboardInterface import (
-                    MujocoKeyboardInterface,
-                )
-
-                MujocoKeyboardInterface(env)
-        if hasattr(env, "commands") and not args.headless:
-            # Same indicators, different drawing primitives per viewer.
-            if args.backend == "vsim":
-                from gym.utils.interfaces.VsimCommandVisualizer import (
-                    VsimCommandVisualizer,
-                )
-
-                VsimCommandVisualizer(env)
-            else:
-                from gym.utils.interfaces.CommandVisualizer import CommandVisualizer
-
-                CommandVisualizer(env)
-        if args.video:
-            record(env, runner, args, command_at)
-        else:
-            play(env, runner, command_at)
+                play(env, runner, command_at)
+        finally:
+            env._backend.close()
 
 
 if __name__ == "__main__":

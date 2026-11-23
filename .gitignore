@@ -18,6 +18,9 @@ gym/wandb
 *.npz
 user/wandb_config.json
 *trajectories/
+go2_deploy/custom_implementation/*
+!go2_deploy/custom_implementation/go2trot_base.py
+!go2_deploy/custom_implementation/go2osc_push_glide.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
