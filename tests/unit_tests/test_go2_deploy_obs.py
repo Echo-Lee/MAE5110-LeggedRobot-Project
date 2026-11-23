@@ -12,20 +12,21 @@ import torch
 
 from go2_deploy.deploy_config import DeployConfig
 from go2_deploy.utility import deploy_utility
+from go2_deploy.utility.import_custom_impl import load_custom_impl
 
 SDK_IN_QGYM_ORDER = [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
 
 
 def _controller(cfg=None):
     if cfg is None:
-        cfg = DeployConfig()
+        cfg = DeployConfig(load_custom_impl("go2trot"))
     return SimpleNamespace(
         cfg=cfg,
         obs_vec_size=sum(cfg.obs_sizes[name] for name in cfg.obs_vector),
         last_command=torch.tensor([0.5, -0.25, 0.75]),
         last_action=torch.zeros(2, 12),
         phase=0.4,
-        phase_frequency=cfg.phase_frequency,
+        phase_frequency=cfg.custom_impl.get_custom_buffers_dict()["phase_frequency"],
     )
 
 
@@ -90,7 +91,7 @@ def test_wxyz_quaternion_projects_gravity_but_gyro_is_already_body_local():
 
 
 def test_observation_dispatch_preserves_configured_order_sizes_and_scaling():
-    cfg = DeployConfig()
+    cfg = DeployConfig(load_custom_impl("go2trot"))
     cfg.obs_vector = [
         "phase_frequency",
         "dof_vel",
@@ -137,8 +138,7 @@ def test_observation_dispatch_preserves_configured_order_sizes_and_scaling():
 
 
 def test_frequency_observation_tracks_active_controller_frequency():
-    cfg = DeployConfig()
-    cfg.phase_frequency = 1.25
+    cfg = DeployConfig(load_custom_impl("go2trot"))
     cfg.obs_vector = ["phase_frequency"]
     cfg.DeployScaling = SimpleNamespace(phase_frequency=4.0)
     controller = _controller(cfg)

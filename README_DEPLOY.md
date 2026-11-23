@@ -1,5 +1,9 @@
 # Deploying a custom policy
 
+For the step-by-step path from a trained policy to the robot (wired and
+wireless), see [DEPLOY.md](DEPLOY.md). This file has the one-time setup and
+reference details.
+
 ## Setup
 
 ### Install required packages
@@ -53,16 +57,22 @@ Instructions are for Linux (Ubuntu)
 
 ## Configure deployment
 
-Settings can be configured in `go2_deploy/deploy_config.py`. Options include:
+Policy-specific settings live in the task's `CustomConfig` subclass in
+`go2_deploy/custom_implementation/` (e.g. `go2trot_base.py`), found by its
+`task_name`; see [DEPLOY.md](DEPLOY.md#2-describe-the-policy-in-a-customconfig):
+- Observation vector, sizes of custom observations, and their scaling (`DeployScaling`)
+- Default joint posture (`default_dof_pos`)
+- Custom buffers and observations, e.g. the gait frequency (`phase_frequency`,
+  in Hz) that drives the Go2Trot phase clock and its frequency observation
+
+Deploy-only settings stay in `go2_deploy/deploy_config.py`:
 - Control frequency
 - kp (Stiffness constant)
 - kd (Damping constant)
-- Observation vector: a list of available observations can be found in `obs_sizes`
 - Command limits (ex. pushing the joystick all the way to the right commands x m/s)
-- Gait frequency (`phase_frequency`, in Hz): controls the Go2Trot phase clock and its frequency observation
 
 For current Go2Trot policies, joint-position observations are relative to the
-static nominal posture from `Go2TrotCfg` (hip 0, thigh 0.96, calf -1.36 radians).
+static nominal posture `default_dof_pos` (hip 0, thigh 0.96, calf -1.36 radians).
 Scaled policy actions are offsets from that posture. The gait reference is a
 training reward only; deployment retains the sine/cosine phase observations and
 observes the controller's active gait frequency, divided by its observation scale.
@@ -79,9 +89,9 @@ controller semantics.
 
 If anything goes wrong, the emergency stop on the wireless controller is X or the enter key in the terminal.
 
-- Make sure your trained policy is in `logs/`, and that the observation vector, scaling, and other settings in `deploy_config.py` are all correct.
+- Make sure your trained policy is in `logs/<task>/`, and that the observation vector, scaling and posture in your `CustomConfig` subclass match it.
 - Turn on the Go2 and wait until it is in the standing position.
-- In the terminal, run `uv run --extra unitree_sdk python -m go2_deploy.deploy eth0`, but replace `eth0` with the actual network configuration. Keep `CYCLONEDDS_HOME` exported. If this is successful, there should be a terminal output every few seconds telling you about the keyboard controls, observation frequency, etc.
+- In the terminal, run `uv run --extra unitree_sdk python -m go2_deploy.deploy eth0 --task go2trot`, but replace `eth0` with the actual network configuration. Keep `CYCLONEDDS_HOME` exported. If this is successful, there should be a terminal output every few seconds telling you about the keyboard controls, observation frequency, etc.
 - There are 4 states the robot can be in:
     - `RECOVERY`: Initially when the script starts running, the robot is in this mode. You must enter this state from `EMERGENCY_STOP` otherwise. The default Unitree controller can be used to make the robot walk, do tricks, etc. The `F1` key on the remote control can be used to disable/enable the A, B, X, and Y buttons, so that the default Unitree button combinations can be used without accidentally turning on a different state.
     - `EMERGENCY_STOP`: The robot will immediately start damping, wait around 15 seconds, and then stand up again. The robot will automatically enter the `RECOVERY` state.
@@ -92,30 +102,30 @@ If anything goes wrong, the emergency stop on the wireless controller is X or th
 
 ## Onboard deployment (Go2 EDU, wireless)
 
-The control loop can run on the Go2 EDU's Jetson, so DDS never leaves the
-robot's wired network and Wi-Fi only carries SSH. The RC works exactly as
-below (it reaches the code through `rt/lowstate`), with or without the PC.
+The control loop runs on the Go2 EDU's Jetson, so DDS never leaves the
+robot. The PC only talks to the Jetson over the ethernet cable, to send the
+repo and bundle. Running untethered ("wireless") means installing the bundle
+over the cable, unplugging, and starting it from the remote with `L1 + R1`
+(see [below](#without-the-pc-start-and-stop-from-the-remote-l1--r1-l2--r2)).
+The RC works the same either way (it reaches the code through `rt/lowstate`).
 
-1. **Network.** eduroam won't work (per-user credentials, client isolation).
-   Over the ethernet cable, `ssh unitree@192.168.123.18` and check `iw dev`.
-   If the Jetson has Wi-Fi, start a hotspot:
-   `nmcli dev wifi hotspot ifname wlan0 ssid go2-lab password <pw>`; the PC
-   joins it and reaches the Jetson at `10.42.0.1`. Otherwise use a travel router.
+1. **Network.** Over the ethernet cable, the Jetson is at
+   `ssh unitree@192.168.123.18` (PC on `192.168.123.99/24`, see Setup).
 2. **One-time Jetson setup.** Install `uv` and `tmux`, `uv python install 3.11`
    (JetPack ships 3.8), build CycloneDDS 0.10.2 as in Setup above. The first
    deploy syncs the repo; `uv run` then installs the locked aarch64 wheels.
 3. **Export a policy bundle on the PC:**
-   `uv run --frozen python scripts/export_go2_policy.py --name trot_v1 [--run_name <run>]`
+   `uv run --frozen python scripts/export_go2_policy.py --task go2trot --name trot_v1 [--run_name <run>]`
    writes `logs/policies/trot_v1/` with `policy.pt` and `deploy_meta.json`.
    The bundle carries the obs layout, every obs/action scale, the default
    posture, gains, command limits, provenance and the network's hash, so the
    scaling can't drift from the weights. Export right after training.
 4. **Deploy:**
-   `uv run --frozen python scripts/deploy_go2_remote.py --bundle logs/policies/trot_v1 --host unitree@10.42.0.1`
+   `uv run --frozen python scripts/deploy_go2_remote.py --bundle logs/policies/trot_v1 --host unitree@192.168.123.18`
    rsyncs the repo and bundle and starts `go2_deploy.deploy eth0 --bundle ...`
    in a tmux session `go2_deploy` on the Jetson. Detach with `Ctrl+b d`;
    rerun the command to reattach. `--dry_run` prints the commands.
-5. **Logs:** `... deploy_go2_remote.py --host unitree@10.42.0.1 --pull_logs`.
+5. **Logs:** `... deploy_go2_remote.py --host unitree@192.168.123.18 --pull_logs`.
    Each run's `meta.json` includes the full bundle metadata. Each run directory
    also has `terminal.log` (everything the script printed, timestamped per
    line) and `exit.json` (why and when it ended: L2 + R2 or `tmux kill-session`,
@@ -197,4 +207,4 @@ Type the following letters in the terminal:
 - `deploy.py` is printing errors in the terminal
     - Make sure the robot is either lying down, or standing up while in sport mode, and exit the script in the terminal.
 - The robot is shaking violently when running a custom policy
-    - In `deploy_config.py`, make sure that your observation vector is correct and the values in the `DeployScaling` class match what you used during training. Also make sure you are running the correct policy from `logs/`.
+    - In your `CustomConfig` subclass, make sure `obs_vector` (including its order), `DeployScaling` and `default_dof_pos` match the run's saved config in `logs/<task>/<run>/files/gym/envs/`. Also make sure you are running the correct policy (check `provenance.run_dir` in the bundle's `deploy_meta.json`).

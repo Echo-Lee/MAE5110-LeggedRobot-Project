@@ -1,9 +1,9 @@
 """Send the repo and a policy bundle to the Go2's Jetson, then run it in tmux.
 
     uv run --frozen python scripts/deploy_go2_remote.py \
-        --bundle logs/policies/trot_v1 --host unitree@10.42.0.1
+        --bundle logs/policies/trot_v1 --host unitree@192.168.123.18
     uv run --frozen python scripts/deploy_go2_remote.py \
-        --host unitree@10.42.0.1 --pull_logs
+        --host unitree@192.168.123.18 --pull_logs
     uv run --frozen python scripts/deploy_go2_remote.py \
         --bundle logs/policies/trot_v1 --host unitree@192.168.123.18 --install
 
@@ -93,7 +93,7 @@ def run(command, dry_run):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--host", required=True, help="e.g. unitree@10.42.0.1")
+    parser.add_argument("--host", required=True, help="e.g. unitree@192.168.123.18")
     parser.add_argument("--bundle", help="Local bundle directory to deploy")
     parser.add_argument("--remote_dir", default="BigRedGym", help="Relative to ~")
     parser.add_argument("--interface", default="eth0", help="Jetson's robot NIC")
