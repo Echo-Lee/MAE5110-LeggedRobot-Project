@@ -22,6 +22,7 @@ KEYCODE_TO_ACTION = {
 # lock on the robot (MuJoCoCPUBackend.set_camera_tracking). It is not a
 # command action, so the vsim interface has no counterpart.
 CAMERA_FOLLOW_KEYCODE = ord("F")
+ESCAPE_KEYCODES = {256, 27}
 
 
 class MujocoKeyboardInterface:
@@ -30,10 +31,17 @@ class MujocoKeyboardInterface:
         self.commands = TeleopCommands(env)
 
         env._backend._viewer_key_callback = self._on_key
+        if hasattr(env._backend, "protect_viewer_shortcuts"):
+            env._backend.protect_viewer_shortcuts(
+                set(KEYCODE_TO_ACTION) | {CAMERA_FOLLOW_KEYCODE}
+            )
         self.commands.print_help("MuJoCo viewer")
         print("  F             toggle camera lock on the robot")
 
     def _on_key(self, keycode: int) -> None:
+        if keycode in ESCAPE_KEYCODES:
+            self.env.exit = True
+            return
         if keycode == CAMERA_FOLLOW_KEYCODE:
             backend = self.env._backend
             if not backend.supports_camera_tracking:

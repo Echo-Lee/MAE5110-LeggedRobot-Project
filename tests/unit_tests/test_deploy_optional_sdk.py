@@ -60,7 +60,7 @@ def test_deploy_missing_sdk_explains_extra():
         import runpy
 
         sys.platform = "linux"
-        sys.argv = ["go2_deploy.deploy", "eth0"]
+        sys.argv = ["go2_deploy.deploy", "eth0", "--task", "go2trot"]
         runpy.run_module("go2_deploy.deploy", run_name="__main__")
     """)
     assert result.returncode == 2, result.stderr

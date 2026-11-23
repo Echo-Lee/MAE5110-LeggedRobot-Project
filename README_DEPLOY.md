@@ -53,16 +53,19 @@ Instructions are for Linux (Ubuntu)
 
 ## Configure deployment
 
-Settings can be configured in `go2_deploy/deploy_config.py`. Options include:
-- Control frequency
-- kp (Stiffness constant)
-- kd (Damping constant)
-- Observation vector: a list of available observations can be found in `obs_sizes`
-- Command limits (ex. pushing the joystick all the way to the right commands x m/s)
-- Gait frequency (`phase_frequency`, in Hz): controls the Go2Trot phase clock and its frequency observation
+Implement a `CustomConfig` subclass in `go2_deploy/custom_implementation/`,
+using `go2trot_base.py` as an example. Give it a unique `task_name`, ordered
+observations, scales, custom observation sizes, default posture and the three
+buffer/observation callbacks. The runner discovers the class by task name.
+
+Policy-specific control frequency, kp, kd and action smoothing can override
+the defaults on the subclass. Bundle metadata records these settings together
+with observation/action scales and posture. Command limits remain in
+`DeployConfig` and are restored from a bundle when provided.
 
 For current Go2Trot policies, joint-position observations are relative to the
-static nominal posture from `Go2TrotCfg` (hip 0, thigh 0.96, calf -1.36 radians).
+static nominal posture from the task's `CustomConfig` (hip 0, thigh 0.96,
+calf -1.36 radians for Go2Trot).
 Scaled policy actions are offsets from that posture. The gait reference is a
 training reward only; deployment retains the sine/cosine phase observations and
 observes the controller's active gait frequency, divided by its observation scale.
@@ -79,9 +82,9 @@ controller semantics.
 
 If anything goes wrong, the emergency stop on the wireless controller is X or the enter key in the terminal.
 
-- Make sure your trained policy is in `logs/`, and that the observation vector, scaling, and other settings in `deploy_config.py` are all correct.
+- Put the trained policy and its saved `files/gym/envs/` snapshot in `logs/<task>/<run>/`, and match the `CustomConfig` observations, scales and posture to that policy. Tasks with additional inference state, such as Go2osc, require their complete exported bundle; see [GO2OSC_DEPLOY.md](GO2OSC_DEPLOY.md).
 - Turn on the Go2 and wait until it is in the standing position.
-- In the terminal, run `uv run --extra unitree_sdk python -m go2_deploy.deploy eth0`, but replace `eth0` with the actual network configuration. Keep `CYCLONEDDS_HOME` exported. If this is successful, there should be a terminal output every few seconds telling you about the keyboard controls, observation frequency, etc.
+- In the terminal, run `uv run --extra unitree_sdk python -m go2_deploy.deploy eth0 --task go2trot`, replacing `eth0` and the task name as needed. Keep `CYCLONEDDS_HOME` exported. If successful, terminal output shows the keyboard controls and observation frequency.
 - There are 4 states the robot can be in:
     - `RECOVERY`: Initially when the script starts running, the robot is in this mode. You must enter this state from `EMERGENCY_STOP` otherwise. The default Unitree controller can be used to make the robot walk, do tricks, etc. The `F1` key on the remote control can be used to disable/enable the A, B, X, and Y buttons, so that the default Unitree button combinations can be used without accidentally turning on a different state.
     - `EMERGENCY_STOP`: The robot will immediately start damping, wait around 15 seconds, and then stand up again. The robot will automatically enter the `RECOVERY` state.
@@ -105,7 +108,7 @@ below (it reaches the code through `rt/lowstate`), with or without the PC.
    (JetPack ships 3.8), build CycloneDDS 0.10.2 as in Setup above. The first
    deploy syncs the repo; `uv run` then installs the locked aarch64 wheels.
 3. **Export a policy bundle on the PC:**
-   `uv run --frozen python scripts/export_go2_policy.py --name trot_v1 [--run_name <run>]`
+   `uv run --frozen python scripts/export_go2_policy.py --task go2trot --name trot_v1 [--run_name <run>]`
    writes `logs/policies/trot_v1/` with `policy.pt` and `deploy_meta.json`.
    The bundle carries the obs layout, every obs/action scale, the default
    posture, gains, command limits, provenance and the network's hash, so the

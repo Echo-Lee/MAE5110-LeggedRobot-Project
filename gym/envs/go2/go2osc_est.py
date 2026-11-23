@@ -297,6 +297,7 @@ class Go2OscPushGlideEst(Go2OscPushGlide):
             samples_per_step=settings.samples_per_step,
             update_interval=settings.update_interval,
             gradient_steps=settings.gradient_steps,
+            normalization_updates=getattr(settings, "normalization_updates", 1),
         )
         self.estimator.unnormalized_inputs = new_inputs
         # Per-feature sensor-noise std for the estimator's inputs (set by
@@ -432,6 +433,10 @@ class Go2OscPushGlideEst(Go2OscPushGlide):
         )
         return model.to(self.device), new_inputs.to(self.device)
 
+    def _estimator_targets(self):
+        """True (mu, vx, vy, vz) labels [N, 4] the estimator learns."""
+        return targets_from_env(self)
+
     def _publish_estimate(self):
         self.contact_friction_hat = self.estimator.mu_hat.clamp(
             *FRICTION_CLIP
@@ -457,7 +462,7 @@ class Go2OscPushGlideEst(Go2OscPushGlide):
         self._refresh_leg_kinematics()
         self.estimator.step(
             self._estimator_inputs(),
-            targets_from_env(self),
+            self._estimator_targets(),
             self.estimator_noise_std,
         )
         self._publish_estimate()

@@ -1,77 +1,82 @@
-from gym.envs.go2.go2trot_config import Go2TrotCfg
 import torch
-from go2_deploy.utility.import_custom_impl import custom_impl
+import numpy as np
+from go2_deploy.custom_implementation.custom_config import CustomConfig
 
 
 class DeployConfig:
-    task_name = "go2osc_push_glide_robust"
-    experiment_name = "go2osc_push_glide_robust_carve_4000"
-    load_run = "Nov20_18-29-45_"
-    checkpoint = 4000
-
-    ctrl_freq = 100  # Hz
-
-    kp = 30.0  # Stiffness constant
-    kd = 2.0  # Damping constant
-
-    # Mechanical Go2 joint limits from resources/robots/go2/urdf/go2.urdf,
-    # in canonical FL, FR, RL, RR / hip, thigh, calf order.  Commands sent
-    # to hardware stay this far inside the hard stops.
-    joint_target_margin = 0.05  # rad
-    _joint_lower = torch.tensor(
-        [-1.0472, -1.5708, -2.7227] * 2 + [-1.0472, -0.5236, -2.7227] * 2
-    )
-    _joint_upper = torch.tensor(
-        [1.0472, 3.4907, -0.83776] * 2 + [1.0472, 4.5379, -0.83776] * 2
-    )
-    joint_target_lower = _joint_lower + joint_target_margin
-    joint_target_upper = _joint_upper - joint_target_margin
-
-    # Apply exponential moving average to actions
-    exp_moving_avg = False
-    ema_smoothing_factor = 0.1
-
-    obs_vector = custom_impl.CustomDeployConfig.obs_vector
-
-    # Scale observations
-    class DeployScaling(custom_impl.CustomDeployConfig.DeployScaling):
-        pass
-
-    # Set ranges of joystick commands
-    command_limits = {
-        "lin_vel_x": 2.0, "lin_vel_y": 0.3, "yaw_vel": 0.5,
-    }
-
-    # Specify size of observation vector. should not have to modify this
-    obs_sizes = {
-        "base_ang_vel": 3,
-        "projected_gravity": 3,
-        "commands": 3,
-        "dof_pos_obs": 12,
-        "dof_vel": 12,
-        "dof_accel": 12,
-        "dof_pos_target": 12,
-    }
-    obs_sizes.update(custom_impl.CustomDeployConfig.custom_obs_sizes)
-
-    # Canonical FL, FR, RL, RR order; hip, thigh, calf within each leg.
-    default_dof_pos = torch.tensor(
-        [
-            angle
-            for leg in ("FL", "FR", "RL", "RR")
-            for angle in (
-                Go2TrotCfg.init_state.default_joint_angles["hip_joint"],
-                Go2TrotCfg.init_state.default_joint_angles[f"{leg}_thigh_joint"],
-                Go2TrotCfg.init_state.default_joint_angles["calf_joint"],
+    # custom_impl: CustomConfig instance, from load_custom_impl(task_name)
+    def __init__(self, custom_impl):
+        if not isinstance(custom_impl, CustomConfig):
+            raise TypeError(
+                f"custom_impl must be a CustomConfig instance, got {custom_impl!r}"
             )
-        ]
-    )
+        self.custom_impl = custom_impl
 
-    # s: how often terminal should print ctrl freq, instructions
-    terminal_log_period = 2.0
+        # Default parameters
+
+        self.task_name = custom_impl.task_name
+
+        self.ctrl_freq = custom_impl.ctrl_freq  # Hz
+
+        self.kp = custom_impl.kp
+        self.kd = custom_impl.kd
+
+        # Apply exponential moving average to actions
+        self.exp_moving_avg = custom_impl.exp_moving_avg
+        self.ema_time_const = 0.095  # seconds
+        self.ema_smoothing_factor = -np.expm1(
+            -(1 / self.ctrl_freq) / self.ema_time_const
+        )  # alpha in EMA
+
+        self.obs_vector = list(self.custom_impl.obs_vector)
+
+        # Scale observations
+        class DeployScaling(self.custom_impl.DeployScaling):
+            pass
+
+        self.DeployScaling = DeployScaling
+
+        # Set ranges of joystick commands
+        self.command_limits = {
+            "lin_vel_x": 2.0,  # m/s
+            "lin_vel_y": 1.0,  # m/s
+            "yaw_vel": 3.0,  # rad/s
+        }
+
+        # Specify size of observation vector pieces
+        self.obs_sizes = {
+            "base_ang_vel": 3,
+            "projected_gravity": 3,
+            "commands": 3,
+            "dof_pos_obs": 12,
+            "dof_vel": 12,
+            "dof_accel": 12,
+            "dof_pos_target": 12,
+        }
+
+        self.obs_sizes.update(self.custom_impl.custom_obs_sizes)
+
+        # Static default posture the actions are offsets from (canonical
+        # FL, FR, RL, RR order; hip, thigh, calf within each leg)
+        self.default_dof_pos = torch.tensor(
+            self.custom_impl.default_dof_pos, dtype=torch.float
+        )
+        # Training run the policy came from; set by setup_actor()
+        self.run_dir = None
+
+        # s: how often terminal should print ctrl freq, instructions
+        self.terminal_log_period = 2.0
+
+        # Set by policy_bundle.load_bundle(): the bundle's deploy_meta.json
+        self.bundle_meta = None
+
+        self.validate()
+
+    def obs_dim(self):
+        return sum(self.obs_sizes[obs] for obs in self.obs_vector)
 
     # Check for unsafe config
-    def __init__(self):
+    def validate(self):
         if self.ctrl_freq < 20:
             raise ValueError("ctrl_freq should be > 20")
         if self.kp <= 0:
@@ -81,3 +86,8 @@ class DeployConfig:
         for obs in self.obs_vector:
             if obs not in self.obs_sizes:
                 raise KeyError("observation " + obs + " not supported")
+        if self.default_dof_pos.shape != (12,):
+            raise ValueError(
+                f"default_dof_pos should have 12 joint angles, "
+                f"got shape {tuple(self.default_dof_pos.shape)}"
+            )

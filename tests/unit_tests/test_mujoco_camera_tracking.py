@@ -38,6 +38,9 @@ class _StubViewer:
     def lock(self):
         return contextlib.nullcontext()
 
+    def close(self):
+        pass
+
 
 @pytest.fixture
 def viewer(monkeypatch):
@@ -45,6 +48,7 @@ def viewer(monkeypatch):
 
     stub = _StubViewer()
     monkeypatch.setattr(mujoco.viewer, "launch_passive", lambda *a, **k: stub)
+    monkeypatch.setattr(mujoco.viewer, "_MJPYTHON", object())
     return stub
 
 

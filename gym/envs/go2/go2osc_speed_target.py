@@ -56,6 +56,18 @@ class Go2OscSpeedTargetMixin:
             return self.clock_speed_obs
         return super()._clock_forward_command()
 
+    def _clock_friction(self):
+        """Friction [N] the clock speed target assumes: the estimate."""
+        return self.friction_estimate_obs[:, 0]
+
+    def _clock_target_command(self):
+        """Forward command [N] the speed target moves toward."""
+        return self.commands[:, 0]
+
+    def _clock_start_speed(self):
+        """Forward speed [N, 1] a fresh episode starts v_t at."""
+        return self.base_lin_vel[:, :1]
+
     def _advance_clock_speed(self, reset_mask=None):
         """Move v_t toward the forward command at friction-limited rates.
 
@@ -69,13 +81,13 @@ class Go2OscSpeedTargetMixin:
             return
         if reset_mask is not None:
             masked_update(
-                self.clock_speed_obs, self.base_lin_vel[:, :1], reset_mask.unsqueeze(1)
+                self.clock_speed_obs, self._clock_start_speed(), reset_mask.unsqueeze(1)
             )
             return
         settings = self.cfg.reward_settings
-        target = self.commands[:, 0]
+        target = self._clock_target_command()
         speed = self.clock_speed_obs[:, 0]
-        friction = self.friction_estimate_obs[:, 0].clamp(
+        friction = self._clock_friction().clamp(
             min=self.cfg.osc.clock_speed_min_friction
         )
         limit = friction * 9.81

@@ -31,6 +31,7 @@ class OnPolicyRunner(BaseRunner):
         # Env-side learners (e.g. a concurrent state estimator) train only
         # inside learn(), never during evaluation or playback.
         self._env_hook("set_learning", True)
+        self._env_hook("set_iteration", self.it)
         actor_obs = self.get_obs(self.actor_cfg["obs"])
         critic_obs = self.get_obs(self.critic_cfg["obs"])
         tot_iter = self.it + self.num_learning_iterations
@@ -64,6 +65,9 @@ class OnPolicyRunner(BaseRunner):
 
         logger.tic("runtime")
         for self.it in range(self.it + 1, tot_iter + 1):
+            # Env-side schedules (e.g. a hand-over from true states to
+            # estimates) follow the training iteration.
+            self._env_hook("set_iteration", self.it)
             logger.tic("iteration")
             logger.tic("collection")
 
@@ -247,6 +251,8 @@ class OnPolicyRunner(BaseRunner):
         self.it = loaded_dict["iter"]
         if "env_state_dict" in loaded_dict:
             self._env_hook("load_checkpoint_state", loaded_dict["env_state_dict"])
+        # After the env state: a checkpoint is evaluated as it was trained.
+        self._env_hook("set_iteration", self.it)
 
     def switch_to_eval(self):
         self.alg.actor.eval()

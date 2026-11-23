@@ -189,6 +189,16 @@ def test_mujoco_ignores_unbound_keys():
     assert torch.equal(env.commands, before)
 
 
+@pytest.mark.parametrize("keycode", [256, 27])
+def test_mujoco_escape_requests_exit_without_changing_commands(keycode):
+    env = FakeEnv()
+    ui = MujocoKeyboardInterface(env)
+    before = env.commands.clone()
+    ui._on_key(keycode)
+    assert env.exit
+    torch.testing.assert_close(env.commands, before)
+
+
 @pytest.mark.parametrize("keycode, action", [(265, "up"), (264, "down")])
 def test_mujoco_arrows_dispatch(keycode, action):
     ui = MujocoKeyboardInterface(FakeEnv())
@@ -199,6 +209,40 @@ def test_mujoco_arrows_dispatch(keycode, action):
 
 
 # ── Command semantics (shared by both) ───────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "period,expected",
+    [(3.0, 9999.0), (51.0, 9999.0), (9999.0, 9999.0), (20000.0, 20000.0)],
+)
+def test_manual_controls_keep_command_sampling_outside_the_playback_horizon(
+    period, expected
+):
+    env = FakeEnv()
+    env.max_episode_length_s = 50.0
+    env.cfg.commands = SimpleNamespace(resampling_time=period)
+    TeleopCommands(env)
+    assert env.cfg.commands.resampling_time == expected
+    assert env.cfg.commands.resampling_time > 10 * env.max_episode_length_s
+
+
+def test_reset_keeps_each_manual_command_when_the_environment_resamples_it():
+    env = FakeEnv()
+    controls = TeleopCommands(env)
+    selected = torch.tensor([[1.5, 0.2, -0.4], [-0.5, -0.2, 0.4]])
+    env.commands.copy_(selected)
+    original_tensor = env.commands
+
+    def reset_with_new_commands():
+        env.reset_count += 1
+        env.commands.fill_(3.0)
+
+    env.reset = reset_with_new_commands
+    controls.apply("reset")
+    assert env.reset_count == 1
+    assert env.timed_out.all()
+    assert env.commands is original_tensor
+    torch.testing.assert_close(env.commands, selected)
 
 
 def test_direction_actions_move_expected_axes():
@@ -295,6 +339,7 @@ def test_viewer_launched_with_panels_hidden(monkeypatch):
         return _StubViewer()
 
     monkeypatch.setattr(mujoco.viewer, "launch_passive", fake_launch)
+    monkeypatch.setattr(mujoco.viewer, "_MJPYTHON", object())
 
     b = MuJocoCPUBackend()
     b.setup(_pendulum_cfg(show_ui=False), num_envs=1, device="cpu", task=None)
