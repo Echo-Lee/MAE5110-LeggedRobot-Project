@@ -15,7 +15,7 @@ class KeyboardHandler:
             self.controller.request_emergency_stop()
         # elif key == "r":
         #     self.controller.request_recovery()
-        #elif key == "q":
+        # elif key == "q":
         #    self.controller.request_intermediate()
         elif key == "c":
             self.controller.request_custom_ctrl()

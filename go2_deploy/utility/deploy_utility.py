@@ -10,6 +10,7 @@ QGYM_TO_UNITREE_JOINT_IDX = torch.tensor([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8])
 
 # Compute pieces of the observation vector, returning torch tensors
 
+
 def _get_obs_base_ang_vel(main_controller, lowstate_msg):
     return torch.tensor(lowstate_msg.imu_state.gyroscope)
 

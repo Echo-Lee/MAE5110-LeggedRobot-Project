@@ -36,9 +36,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--name", required=True, help="Bundle name")
     parser.add_argument(
-        "--task", required=True, help="Task name, e.g. go2trot (selects the custom_impl)"
+        "--task",
+        required=True,
+        help="Task name, e.g. go2trot (selects the custom_impl)",
     )
-    parser.add_argument("--run_name", help="Training run in logs/<task>/ (default: latest)")
+    parser.add_argument(
+        "--run_name", help="Training run in logs/<task>/ (default: latest)"
+    )
     parser.add_argument("--out_root", default=DEFAULT_OUT_ROOT)
     args = parser.parse_args()
 

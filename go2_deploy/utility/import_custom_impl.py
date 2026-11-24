@@ -53,7 +53,7 @@ def load_custom_impl(task_name):
         found = ", ".join(f"{cls.__name__} ({name})" for name, cls in matches)
         raise ValueError(f"Multiple custom implementations for '{task_name}': {found}")
     if not matches:
-        message = f"No CustomConfig subclass with task_name '{task_name}' in {CUSTOM_IMPL_DIR}"
+        message = f"No CustomConfig subclass for '{task_name}' in {CUSTOM_IMPL_DIR}"
         if errors:
             message += "\nThese files failed to load:\n" + "\n".join(errors)
         raise LookupError(message)

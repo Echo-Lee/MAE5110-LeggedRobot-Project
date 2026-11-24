@@ -58,7 +58,8 @@ class Go2TrotBase(CustomConfig):
             2 * math.pi * main_controller.phase_frequency * t % (2 * math.pi)
         )
 
-    # Return a dict mapping observation names to functions that generate the observation pieces
+    # Return a dict mapping observation names to functions that generate the observation
+    # pieces
     def get_custom_obs_pieces(self):
         obs_pieces = {
             "phase_obs": self._get_obs_phase_obs,

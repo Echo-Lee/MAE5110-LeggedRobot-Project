@@ -6,7 +6,8 @@ scaled) observation columns through the actor loaded by
 
 Usage (from the repository root):
 
-    uv run --frozen python go2_deploy/utility/replay_actor.py 2026-08-12_11-16-05 --task go2trot
+    uv run --frozen python go2_deploy/utility/replay_actor.py 2026-08-12_11-16-05
+           --task go2trot
     uv run --frozen python go2_deploy/utility/replay_actor.py \
         logs/deploy/2026-08-12_11-16-05 --task go2trot --run-name <policy_run> --compare
 """
