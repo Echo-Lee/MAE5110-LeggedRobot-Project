@@ -1,5 +1,11 @@
 """The declared task manifest must register completely and exactly."""
 
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
 import pytest
 import torch
 
@@ -8,6 +14,24 @@ from gym.utils.task_registry import task_registry
 from learning.algorithms import get_algorithm_class
 from learning.modules import get_critic_class
 from learning.runners import get_runner_class
+
+
+SUPPORTED_TASK_NAMES = {
+    "cartpole",
+    "mini_cheetah",
+    "mini_cheetah_ref",
+    "mini_cheetah_ref_vsim",
+    "mini_cheetah_osc",
+    "sac_mini_cheetah",
+    "humanoid",
+    "humanoid_running",
+    "pendulum",
+    "sac_pendulum",
+    "psd_pendulum",
+    "go2",
+    "go2trot",
+    "go2osc_push_glide_deploy",
+}
 
 
 UNSUPPORTED_TERRAIN_FIELDS = {
@@ -45,7 +69,8 @@ LEGACY_ASSET_FIELDS = {
 
 
 def test_declared_tasks_register_with_declared_components():
-    expected_names = set(envs.task_dict)
+    expected_names = SUPPORTED_TASK_NAMES
+    assert set(envs.task_dict) == expected_names
 
     assert set(task_registry.task_classes) == expected_names
     assert set(task_registry.env_cfgs) == expected_names
@@ -154,3 +179,27 @@ def test_declared_task_runs_one_action_step_on_mujoco_cpu(task_name):
         assert torch.isfinite(env.torques).all()
     finally:
         env._backend.close()
+
+
+def test_default_import_preserves_upstream_examples_and_adds_only_the_current_task():
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json, sys; import gym.envs as envs; "
+            "from gym.utils.task_registry import task_registry; "
+            "expected = set(json.loads(sys.argv[1])); "
+            "assert set(envs.task_dict) == expected; "
+            "assert set(task_registry.task_classes) == expected; "
+            "assert set(task_registry.env_cfgs) == expected; "
+            "assert set(task_registry.train_cfgs) == expected",
+            json.dumps(sorted(SUPPORTED_TASK_NAMES)),
+        ],
+        cwd=root,
+        env=dict(os.environ, PYTHONPATH=str(root)),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -255,12 +255,16 @@ class LeggedRobot(BaseTask):
             # )
         return props
 
+    def _joint_position_target(self):
+        """Joint-position target the motors act on in this physics step."""
+        return self.dof_pos_target
+
     def _compute_torques(self):
         pos = self.dof_pos.index_select(1, self.actuated_dof_indices)
         vel = self.dof_vel.index_select(1, self.actuated_dof_indices)
         default_pos = self.default_dof_pos.index_select(1, self.actuated_dof_indices)
         torques = (
-            self.p_gains * (self.dof_pos_target + default_pos - pos)
+            self.p_gains * (self._joint_position_target() + default_pos - pos)
             + self.d_gains * (self.dof_vel_target - vel)
             + self.tau_ff
         )

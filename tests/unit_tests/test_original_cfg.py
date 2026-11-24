@@ -140,3 +140,36 @@ def test_train_and_play_accept_original_cfg_flag():
 
     assert train_args.original_cfg is True
     assert play_args.original_cfg is True
+
+
+def test_current_task_saved_source_loads_and_constructs(tmp_path):
+    from pathlib import Path
+    import warnings
+    from gym.utils.logging_and_saving.local_code_save_helper import (
+        save_local_files_to_logs,
+    )
+    from gym.utils.task_registry import task_registry
+    import torch
+
+    run_dir = tmp_path / "run_a"
+    save_local_files_to_logs(str(run_dir))
+    saved = run_dir / "files/gym/envs/go2/go2osc_onboard.py"
+    current = Path(current_envs.__file__).parent / "go2/go2osc_onboard.py"
+    assert saved.read_bytes() == current.read_bytes()
+    env_cfg, train_cfg = load_original_cfgs_from_run(
+        "go2osc_push_glide_deploy", run_dir
+    )
+    env_cfg.env.num_envs = 2
+    env_cfg.seed = train_cfg.seed = 0
+    env_cfg.state_estimator.hidden_dims = [16]
+    task_registry.convert_frequencies_to_params(env_cfg, train_cfg)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        env = task_registry.make_env("go2osc_push_glide_deploy", env_cfg, "cpu", True)
+    try:
+        env.step()
+        observation = env.get_states(train_cfg.actor.obs)
+        assert observation.shape == (2, 58)
+        assert torch.isfinite(observation).all()
+    finally:
+        env._backend.close()

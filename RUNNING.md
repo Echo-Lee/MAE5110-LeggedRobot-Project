@@ -60,3 +60,47 @@ Step by step, wired and wireless: [DEPLOY.md](DEPLOY.md).
 - The onboard run lives in tmux session `go2_deploy`; an SSH drop doesn't stop it.
   The RC's X is the e-stop, not the PC.
 - Bundles (`logs/policies/`) and `*.pt` are gitignored; move them with the deploy script.
+
+## Go2 push/glide training and playback
+
+`go2osc_push_glide_deploy` trains a push/glide policy and friction/body-velocity
+estimator together from scratch. The actor has 58 inputs and 12 joint-target
+outputs; the training critic has 75 inputs. Ground friction spans `[0.05, 1.0]`
+and forward commands span `[-1.0, 2.0]` m/s, including standing and turning.
+Control runs at 100 Hz and physics at 500 Hz.
+This task uses MuJoCo CPU or MuJoCo Warp (`--backend mujoco`).
+
+For Linux/NVIDIA training, verify `nvidia-smi`, then:
+
+```sh
+uv sync --frozen --extra gpu
+PYTHONPATH=. uv run --frozen --extra gpu python scripts/train.py \
+    --task go2osc_push_glide_deploy --backend mujoco --device cuda:0 \
+    --num_envs 4096 --max_iterations 4000 --save_interval 50 --seed 0 \
+    --experiment_name go2osc_push_glide_deploy --headless --disable_wandb
+```
+
+For a small CPU check, omit `--extra gpu` and use
+`--device cpu --num_envs 16 --max_iterations 2`.
+No initial policy or estimator checkpoint is required. The joint-target clamp
+closes over iterations 1000–1500; learned estimates replace simulator stand-ins
+over iterations 1500–2000.
+
+Checkpoints and source/configuration snapshots are saved below
+`logs/go2osc_push_glide_deploy/<run>/`. Replace `RUN` with a run directory:
+
+```sh
+PYTHONPATH=. uv run --frozen mjpython scripts/play.py \
+    --task go2osc_push_glide_deploy --backend mujoco --device cpu --num_envs 1 \
+    --experiment_name go2osc_push_glide_deploy --load_run RUN --checkpoint 4000 \
+    --friction 0.05 --basic-visuals --seed 123 --keyboard
+```
+
+On Linux replace `mjpython` with `python`. I/K adjust forward velocity, J/L
+lateral velocity and N/M yaw rate. R resets while retaining the command;
+Esc exits. For a fixed command, replace `--keyboard` with
+`--command 1.0 0.0 0.0`.
+
+Playback uses the current task configuration. Archived snapshots require their
+matching release code when their configuration imports modules absent from the
+current checkout. Use `--original_cfg` only for compatible saved configurations.

@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -28,6 +30,7 @@ class PPO2:
         device="cpu",
         lr_range=[1e-4, 1e-2],
         lr_ratio=1.3,
+        max_log_ratio=20.0,
         **kwargs,
     ):
         self.device = device
@@ -53,6 +56,20 @@ class PPO2:
         self.lam = lam
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
+        safe_log_limit = torch.nextafter(
+            torch.tensor(math.log(torch.finfo(torch.float32).max)),
+            torch.tensor(float("-inf")),
+        ).item()
+        if (
+            not isinstance(max_log_ratio, (int, float))
+            or isinstance(max_log_ratio, bool)
+            or not math.isfinite(max_log_ratio)
+            or not 0.0 < max_log_ratio <= safe_log_limit
+        ):
+            raise ValueError("max_log_ratio must be positive and safe for float32 exp")
+        # exp(20) is far above the clip range and far below float overflow.
+        self.max_log_ratio = max_log_ratio
+        self.skipped_updates = 0
 
     def switch_to_train(self):
         self.actor.train()
@@ -96,11 +113,23 @@ class PPO2:
 
             self.critic_optimizer.zero_grad()
             value_loss.backward()
-            nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+            if not self._clip_gradient(self.critic):
+                continue
             self.critic_optimizer.step()
             self.mean_value_loss += value_loss.item()
             counter += 1
+        if counter == 0:
+            raise FloatingPointError("All critic minibatches had nonfinite gradients")
         self.mean_value_loss /= counter
+
+    def _clip_gradient(self, network):
+        """Clip the gradient; report False when it must not be applied."""
+        norm = nn.utils.clip_grad_norm_(network.parameters(), self.max_grad_norm)
+        if torch.isfinite(norm):
+            return True
+        # One non-finite gradient would turn every weight into NaN.
+        self.skipped_updates += 1
+        return False
 
     def update_actor(self, data):
         self.mean_surrogate_loss = 0
@@ -155,10 +184,12 @@ class PPO2:
                         param_group["lr"] = self.learning_rate
 
             # * Surrogate loss
-            ratio = torch.exp(
-                actions_log_prob_batch
-                - torch.squeeze(batch["old_actions_log_prob_batch"])
+            # An unbounded difference overflows exp() to inf, which the clipped
+            # objective back-propagates as NaN.
+            log_ratio = actions_log_prob_batch - torch.squeeze(
+                batch["old_actions_log_prob_batch"]
             )
+            ratio = torch.exp(log_ratio.clamp(-self.max_log_ratio, self.max_log_ratio))
             surrogate = -torch.squeeze(batch["advantages"]) * ratio
             surrogate_clipped = -torch.squeeze(batch["advantages"]) * torch.clamp(
                 ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
@@ -170,8 +201,11 @@ class PPO2:
             # * Gradient step
             self.optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+            if not self._clip_gradient(self.actor):
+                continue
             self.optimizer.step()
             self.mean_surrogate_loss += surrogate_loss.item()
             counter += 1
+        if counter == 0:
+            raise FloatingPointError("All actor minibatches had nonfinite gradients")
         self.mean_surrogate_loss /= counter

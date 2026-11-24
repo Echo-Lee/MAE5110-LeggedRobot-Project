@@ -61,6 +61,7 @@ class MuJocoBackendBase(SimBackend):
         # values on its shared model per environment; Warp overrides them with
         # per-world native views.
         self._contact_friction_t: torch.Tensor = None
+        self._body_geom_cache: dict = {}
         self._nominal_contact_friction: float = 1.0
         self._link_mass_t: torch.Tensor = None
         self._link_inertia_t: torch.Tensor = None
@@ -262,6 +263,31 @@ class MuJocoBackendBase(SimBackend):
             # Explicit pair friction has two tangential directions followed by
             # torsional and rolling slots; it overrides geom mixing.
             model.pair_friction[:, 0:2] = coefficient
+
+    def _geoms_by_body(self, bodies: torch.Tensor) -> tuple[np.ndarray, np.ndarray]:
+        """Native geom ids on the given canonical bodies, and each geom's column."""
+        key = tuple(bodies.tolist())
+        cached = self._body_geom_cache.get(key)
+        if cached is not None:
+            return cached
+        if self._mjm.npair:
+            raise NotImplementedError(
+                "explicit contact pairs override geom mixing; per-body friction "
+                "is not supported for this model"
+            )
+        geoms, columns = [], []
+        for column, body in enumerate(key):
+            native = self._canonical_to_native_body_np[body]
+            found = np.flatnonzero(self._mjm.geom_bodyid == native)
+            if found.size == 0:
+                raise ValueError(
+                    f"body {self._body_names[body]!r} has no collision geometry"
+                )
+            geoms.append(found)
+            columns.append(np.full(found.size, column, dtype=np.int64))
+        cached = (np.concatenate(geoms), np.concatenate(columns))
+        self._body_geom_cache[key] = cached
+        return cached
 
     def _configure_model(self, mjm: mujoco.MjModel, cfg, device: str) -> None:
         """Detect floating-base, set damping/contacts, extract metadata."""

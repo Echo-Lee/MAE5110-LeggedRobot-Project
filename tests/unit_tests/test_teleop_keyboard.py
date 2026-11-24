@@ -295,6 +295,8 @@ def test_viewer_launched_with_panels_hidden(monkeypatch):
         return _StubViewer()
 
     monkeypatch.setattr(mujoco.viewer, "launch_passive", fake_launch)
+    # The fake launch has no native macOS event-loop requirement.
+    monkeypatch.setattr(mujoco.viewer, "_MJPYTHON", object())
 
     b = MuJocoCPUBackend()
     b.setup(_pendulum_cfg(show_ui=False), num_envs=1, device="cpu", task=None)

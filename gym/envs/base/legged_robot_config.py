@@ -113,6 +113,9 @@ class LeggedRobotCfg(BaseConfig):
         file = ""
         vsim_visual_mesh_dir = None
         mujoco_visual_model = None
+        # Load visuals for headless off-screen rendering (video recording),
+        # not only for the interactive viewer. Set by play.py --video.
+        render_offscreen = False
         # * name of the feet bodies,
         # * used to index body state and contact force tensors
         foot_name = "foot"

@@ -28,6 +28,10 @@ class OnPolicyRunner(BaseRunner):
         rewards_dict = self.initialize_rewards_dict(n_policy_steps)
 
         self.alg.switch_to_train()
+        # Env-side learners (e.g. a concurrent state estimator) train only
+        # inside learn(), never during evaluation or playback.
+        self._env_hook("set_learning", True)
+        self._env_hook("set_iteration", self.it)
         actor_obs = self.get_obs(self.actor_cfg["obs"])
         critic_obs = self.get_obs(self.critic_cfg["obs"])
         tot_iter = self.it + self.num_learning_iterations
@@ -61,6 +65,9 @@ class OnPolicyRunner(BaseRunner):
 
         logger.tic("runtime")
         for self.it in range(self.it + 1, tot_iter + 1):
+            # Env-side schedules (e.g. a hand-over from true states to
+            # estimates) follow the training iteration.
+            self._env_hook("set_iteration", self.it)
             logger.tic("iteration")
             logger.tic("collection")
 
@@ -133,6 +140,12 @@ class OnPolicyRunner(BaseRunner):
             if self.it % self.save_interval == 0:
                 self.save()
         self.save()
+        self._env_hook("set_learning", False)
+
+    def _env_hook(self, name, *args):
+        """Call an optional environment hook; None if the env lacks it."""
+        hook = getattr(self.env, name, None)
+        return hook(*args) if callable(hook) else None
 
     @torch.no_grad
     def burn_in_normalization(self, n_iterations=100):
@@ -212,16 +225,18 @@ class OnPolicyRunner(BaseRunner):
         os.makedirs(self.log_dir, exist_ok=True)
         path = os.path.join(self.log_dir, "model_{}.pt".format(self.it))
         temporary = path + ".tmp"
-        torch.save(
-            {
-                "actor_state_dict": self.alg.actor.state_dict(),
-                "critic_state_dict": self.alg.critic.state_dict(),
-                "optimizer_state_dict": self.alg.optimizer.state_dict(),
-                "critic_optimizer_state_dict": self.alg.critic_optimizer.state_dict(),
-                "iter": self.it,
-            },
-            temporary,
-        )
+        checkpoint = {
+            "actor_state_dict": self.alg.actor.state_dict(),
+            "critic_state_dict": self.alg.critic.state_dict(),
+            "optimizer_state_dict": self.alg.optimizer.state_dict(),
+            "critic_optimizer_state_dict": self.alg.critic_optimizer.state_dict(),
+            "iter": self.it,
+        }
+        # Env-owned learned modules (state estimator) travel with the policy.
+        env_state = self._env_hook("checkpoint_state")
+        if env_state is not None:
+            checkpoint["env_state_dict"] = env_state
+        torch.save(checkpoint, temporary)
         os.replace(temporary, path)
 
     def load(self, path, load_optimizer=True):
@@ -234,10 +249,15 @@ class OnPolicyRunner(BaseRunner):
                 loaded_dict["critic_optimizer_state_dict"]
             )
         self.it = loaded_dict["iter"]
+        if "env_state_dict" in loaded_dict:
+            self._env_hook("load_checkpoint_state", loaded_dict["env_state_dict"])
+        # After the env state: a checkpoint is evaluated as it was trained.
+        self._env_hook("set_iteration", self.it)
 
     def switch_to_eval(self):
         self.alg.actor.eval()
         self.alg.critic.eval()
+        self._env_hook("set_learning", False)
 
     def get_inference_actions(self):
         # Inference is deterministic: observation noise is a training-time

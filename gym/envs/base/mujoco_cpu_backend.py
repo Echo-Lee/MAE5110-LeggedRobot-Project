@@ -7,6 +7,8 @@ after each step.
 """
 
 import copy
+import os
+from queue import Empty, SimpleQueue
 import time
 
 import mujoco
@@ -46,11 +48,22 @@ class MuJocoCPUBackend(MuJocoBackendBase):
         self._show_ui = False  # overridden from cfg.viewer.show_ui in setup()
         self._viewer_key_callback = None
         self._viewer_overlay_fn = None  # called each render() before sync()
+        self._viewer_exit_requested = False
+        self._protected_shortcuts = {}
+        self._shortcut_values = {}
+        self._pending_shortcuts = SimpleQueue()
+        self._deferred_shortcuts = set()
+        # Root-tracking camera request; applied to the viewer on the next
+        # render(), since the viewer is created lazily there.
+        self._camera_tracking = False
+        self._camera_tracking_dirty = False
         self._render_deadline = None
         self._render_pending_time = 0.0
         self._randomize_contact_friction = False
         self._randomize_link_mass = False
         self._models: list[mujoco.MjModel] | None = None
+        # [num_envs, ngeom] sliding friction once any body has its own value.
+        self._geom_friction_np: np.ndarray | None = None
 
     # ── State tensors ──────────────────────────────────────────────────────────
 
@@ -95,9 +108,44 @@ class MuJocoCPUBackend(MuJocoBackendBase):
                 "contact-friction randomization was not enabled before setup"
             )
         self._contact_friction_t[ids] = values
+        if self._geom_friction_np is not None:
+            self._geom_friction_np[ids.cpu().numpy()] = values.cpu().numpy()[:, None]
         if self._models is not None:
             for env_id, value in zip(ids.tolist(), values.tolist()):
                 self._set_model_contact_friction(self._models[env_id], value)
+
+    def set_contact_friction_by_body(
+        self,
+        env_ids: torch.Tensor,
+        body_indices: torch.Tensor,
+        coefficients: torch.Tensor,
+    ) -> None:
+        ids, bodies, values = self._prepare_body_friction_update(
+            env_ids, body_indices, coefficients
+        )
+        if ids.numel() == 0:
+            return
+        if not self._randomize_contact_friction:
+            raise RuntimeError(
+                "contact-friction randomization was not enabled before setup"
+            )
+        geoms, columns = self._geoms_by_body(bodies)
+        if self._geom_friction_np is None:
+            self._geom_friction_np = np.repeat(
+                self._contact_friction_t.cpu().numpy().astype(np.float64)[:, None],
+                self._mjm.ngeom,
+                axis=1,
+            )
+        rows = ids.cpu().numpy()
+        table = values.cpu().numpy().astype(np.float64)
+        self._geom_friction_np[rows] = table.min(axis=1, keepdims=True)
+        self._geom_friction_np[rows[:, None], geoms[None, :]] = table[:, columns]
+        self._contact_friction_t[ids] = values.mean(dim=1)
+        if self._models is not None:
+            for env_id in rows.tolist():
+                self._models[env_id].geom_friction[:, 0] = self._geom_friction_np[
+                    env_id
+                ]
 
     def set_link_mass_scale(
         self,
@@ -136,6 +184,9 @@ class MuJocoCPUBackend(MuJocoBackendBase):
         """Activate one environment's parameters on the shared CPU model."""
         if not self._randomize_contact_friction or self._models is not None:
             return
+        if self._geom_friction_np is not None:
+            self._mjm.geom_friction[:, 0] = self._geom_friction_np[env_id]
+            return
         self._set_model_contact_friction(
             self._mjm, float(self._contact_friction_t[env_id])
         )
@@ -148,21 +199,31 @@ class MuJocoCPUBackend(MuJocoBackendBase):
     # ── World building ─────────────────────────────────────────────────────────
 
     def setup(self, cfg, num_envs: int, device: str, task=None) -> None:
+        self._viewer_exit_requested = False
         self._device = device
         self._num_envs = num_envs
         self._randomize_contact_friction = contact_friction_range(cfg) is not None
         self._randomize_link_mass = link_mass_scale_range(cfg) is not None
         headless = task.headless if task is not None else True
+        # Off-screen rendering (video recording) is headless but still draws:
+        # load visuals for it as for the interactive viewer.
+        renders = not headless or getattr(cfg.asset, "render_offscreen", False)
         visual_model = getattr(cfg.asset, "mujoco_visual_model", None)
         visual_model_path = (
             visual_model.format(GYM_ROOT_DIR=GYM_ROOT_DIR)
-            if visual_model is not None and not headless
+            if visual_model is not None and renders
             else None
         )
+        if visual_model_path is not None and not os.path.isfile(visual_model_path):
+            print(
+                "WARNING: optional MuJoCo visual model is unavailable: "
+                f"{visual_model_path}. Falling back to the URDF visuals."
+            )
+            visual_model_path = None
 
         mjm = self._load_model(
             cfg,
-            discard_visual=self._randomize_link_mass and headless,
+            discard_visual=self._randomize_link_mass and not renders,
             visual_model_path=visual_model_path,
         )
         self._configure_model(mjm, cfg, device)
@@ -190,8 +251,9 @@ class MuJocoCPUBackend(MuJocoBackendBase):
         )
 
         # Mass changes require environment-specific derived model constants.
-        # The headless model has already discarded visual assets, so private
-        # copies remain compact. Other serial worlds share one model.
+        # A headless training model has already discarded visual assets, so
+        # private copies stay compact; an off-screen recording keeps them
+        # (it runs few environments). Other serial worlds share one model.
         if self._randomize_link_mass:
             self._models = [mjm] + [copy.copy(mjm) for _ in range(num_envs - 1)]
             self._datas = [mujoco.MjData(model) for model in self._models]
@@ -325,6 +387,152 @@ class MuJocoCPUBackend(MuJocoBackendBase):
 
     # ── Rendering ─────────────────────────────────────────────────────────────
 
+    # Initial framing when tracking starts; the user can still orbit and zoom
+    # around the tracked body with the mouse.
+    TRACKING_DISTANCE_M = 1.5
+    TRACKING_ELEVATION_DEG = -20.0
+    TRACKING_AZIMUTH_DEG = 135.0
+
+    def protect_viewer_shortcuts(self, keycodes) -> None:
+        """Keep teleop presses from changing MuJoCo's visualization options.
+
+        Only a pressed key's colliding fields are restored. Ordinary viewer UI
+        edits remain available and become the baseline for subsequent presses.
+        """
+        keycodes = set(keycodes)
+        shortcuts = {}
+        for kind, table in (
+            ("vis", mujoco.mjVISSTRING),
+            ("render", mujoco.mjRNDSTRING),
+        ):
+            for index, (_, _, shortcut) in enumerate(table):
+                if len(shortcut) == 1 and ord(shortcut.upper()) in keycodes:
+                    shortcuts.setdefault(ord(shortcut.upper()), set()).add(
+                        (kind, index)
+                    )
+        self._protected_shortcuts = shortcuts
+        self._deferred_shortcuts.clear()
+        self._pending_shortcuts = SimpleQueue()
+        self._shortcut_values = {}
+        if self._viewer is None:
+            options, scene = mujoco.MjvOption(), mujoco.MjvScene()
+            for fields in shortcuts.values():
+                for kind, index in fields:
+                    value = (
+                        options.flags[index] if kind == "vis" else scene.flags[index]
+                    )
+                    self._shortcut_values[kind, index] = int(value)
+        else:
+            with self._viewer.lock():
+                self._remember_shortcut_values(self._viewer)
+
+    @staticmethod
+    def _shortcut_value(viewer, field):
+        kind, index = field
+        if kind == "vis":
+            return int(viewer.opt.flags[index])
+        return int(viewer.user_scn.flags[index])
+
+    def _remember_shortcut_values(self, viewer, exclude=()) -> None:
+        for fields in self._protected_shortcuts.values():
+            for field in fields:
+                if field not in exclude:
+                    self._shortcut_values[field] = self._shortcut_value(viewer, field)
+
+    def _take_pending_shortcuts(self):
+        fields, self._deferred_shortcuts = self._deferred_shortcuts, set()
+        while True:
+            try:
+                keycode = self._pending_shortcuts.get_nowait()
+            except Empty:
+                return fields
+            fields.update(self._protected_shortcuts.get(keycode, ()))
+
+    def _restore_shortcut_values(self, viewer, fields) -> None:
+        for field in fields:
+            kind, index = field
+            value = self._shortcut_values[field]
+            if kind == "vis":
+                viewer.opt.flags[index] = value
+            else:
+                viewer.user_scn.flags[index] = value
+
+    def _sync_viewer(self, viewer) -> None:
+        if not self._protected_shortcuts:
+            viewer.sync()
+            return
+        with viewer.lock():
+            changed = self._take_pending_shortcuts()
+            self._restore_shortcut_values(viewer, changed)
+        viewer.sync()
+        with viewer.lock():
+            changed.update(self._take_pending_shortcuts())
+            self._restore_shortcut_values(viewer, changed)
+        if changed:
+            # Native render flags arrive via user_scn during sync. Synchronize
+            # the restored values once more so they reach the native scene.
+            viewer.sync()
+        with viewer.lock():
+            late = self._take_pending_shortcuts()
+            self._deferred_shortcuts.update(late)
+            self._remember_shortcut_values(viewer, exclude=late)
+
+    def _dispatch_viewer_key(self, keycode) -> None:
+        # MuJoCo forwards Escape after its own free-camera action. The main
+        # simulation thread closes the viewer, never this UI callback thread.
+        if keycode in (256, 27):
+            self._viewer_exit_requested = True
+        if keycode in self._protected_shortcuts:
+            self._pending_shortcuts.put(keycode)
+            if self._viewer is not None:
+                # Native handling precedes this callback, and opt is shared.
+                # Undo its visualization toggles before the GUI can draw them.
+                with self._viewer.lock():
+                    self._restore_shortcut_values(
+                        self._viewer,
+                        {
+                            field
+                            for field in self._protected_shortcuts[keycode]
+                            if field[0] == "vis"
+                        },
+                    )
+        if self._viewer_key_callback is not None:
+            self._viewer_key_callback(keycode)
+
+    @property
+    def camera_tracking(self) -> bool:
+        return self._camera_tracking
+
+    @property
+    def supports_camera_tracking(self) -> bool:
+        """Only a floating-base robot has a root body to follow."""
+        return self._has_free_joint
+
+    def set_camera_tracking(self, enabled: bool) -> None:
+        """Lock the viewer camera onto environment 0's floating base.
+
+        The passive viewer draws ``self._datas[0]``, so environment 0 is the
+        robot on screen. Disabling leaves the camera where it is, free.
+        """
+        if enabled and not self._has_free_joint:
+            raise ValueError("camera tracking needs a floating-base robot")
+        self._camera_tracking = enabled
+        self._camera_tracking_dirty = True
+
+    def _apply_camera_tracking(self, viewer) -> None:
+        with viewer.lock():
+            if self._camera_tracking:
+                viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+                # The free joint is joint 0 and sits on the robot's root body.
+                viewer.cam.trackbodyid = int(self._mjm.jnt_bodyid[0])
+                viewer.cam.distance = self.TRACKING_DISTANCE_M
+                viewer.cam.elevation = self.TRACKING_ELEVATION_DEG
+                viewer.cam.azimuth = self.TRACKING_AZIMUTH_DEG
+            else:
+                viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+                viewer.cam.trackbodyid = -1
+        self._camera_tracking_dirty = False
+
     def render(self, sync_frame_time: bool = True) -> None:
         import platform
         import mujoco.viewer
@@ -344,18 +552,13 @@ class MuJocoCPUBackend(MuJocoBackendBase):
             # Indirect through a wrapper so callers can set _viewer_key_callback
             # after the viewer is up (LeggedRobot.__init__ calls reset()→step()
             # →_render() during construction, before any user interface installs).
-            def _key_dispatch(keycode, _self=self):
-                if _self._viewer_key_callback is not None:
-                    _self._viewer_key_callback(keycode)
-
-            # Side panels are hidden by default: their shortcuts bind most
-            # letters to visualisation toggles, which fire alongside keyboard
-            # teleop (see gym/utils/interfaces/teleop_bindings.py).
-            # cfg.viewer.show_ui / play.py --viewer_ui restores them.
+            # Hidden panels keep the view clear but leave native shortcuts
+            # active. The keyboard adapter registers its conflicting keys
+            # with protect_viewer_shortcuts. --viewer_ui shows the panels.
             self._viewer = mujoco.viewer.launch_passive(
                 self._mjm,
                 self._datas[0],
-                key_callback=_key_dispatch,
+                key_callback=self._dispatch_viewer_key,
                 show_left_ui=self._show_ui,
                 show_right_ui=self._show_ui,
             )
@@ -373,9 +576,19 @@ class MuJocoCPUBackend(MuJocoBackendBase):
             else:
                 self._render_deadline = now if sync_frame_time else None
             self._render_pending_time = 0.0
+            if self._camera_tracking_dirty:
+                self._apply_camera_tracking(self._viewer)
             if self._viewer_overlay_fn is not None:
                 self._viewer_overlay_fn(self._viewer)
-            self._viewer.sync()
+            self._sync_viewer(self._viewer)
         else:
             self._render_deadline = None
             self._render_pending_time = 0.0
+
+    def close(self) -> None:
+        """Close the passive viewer from the caller's thread, once."""
+        viewer, self._viewer = self._viewer, None
+        self._render_deadline = None
+        self._render_pending_time = 0.0
+        if viewer is not None:
+            viewer.close()
